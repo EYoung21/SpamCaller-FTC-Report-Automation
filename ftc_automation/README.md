@@ -46,6 +46,14 @@ Open `config.yaml` and fill in:
   (required by the form; only the FTC sees it, not the spammer).
 - `openai.api_key` – or set the `OPENAI_API_KEY` env var (preferred). The
   default model is `gpt-4o-mini`, which classifies ~$0.001 per voicemail.
+  The easiest way is to drop it in a `.env` file at the repo root:
+
+  ```
+  OPENAI_API_KEY=sk-...
+  ```
+
+  The app loads `.env` automatically on startup (via `python-dotenv`).
+  See `.env.example` for the supported variables.
 
 ### 3. Authorize Google Voice (one-time, for backlog scraping)
 

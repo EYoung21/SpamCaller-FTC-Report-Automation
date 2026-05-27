@@ -17,7 +17,47 @@ from pydantic import BaseModel, Field, field_validator
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = PACKAGE_ROOT.parent
 DEFAULT_CONFIG_PATH = PACKAGE_ROOT / "config.yaml"
+
+
+def _load_dotenv_once() -> None:
+    """Load .env from the repo root (and the package root, as a fallback).
+
+    Uses python-dotenv when available; falls back to a tiny built-in
+    parser so the app still works if the dep isn't installed.
+    """
+    candidates = [REPO_ROOT / ".env", PACKAGE_ROOT / ".env"]
+    try:
+        from dotenv import load_dotenv  # type: ignore
+
+        for p in candidates:
+            if p.exists():
+                load_dotenv(dotenv_path=p, override=False)
+        return
+    except ImportError:
+        pass
+
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[len("export ") :]
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+        except OSError:
+            continue
+
+
+_load_dotenv_once()
 
 
 class PersonalConfig(BaseModel):

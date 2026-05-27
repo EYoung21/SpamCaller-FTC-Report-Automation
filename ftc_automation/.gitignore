@@ -9,6 +9,9 @@ secrets/*
 !secrets/README.md
 !secrets/*.example.json
 !secrets/*.example.yaml
+.env
+.env.*
+!.env.example
 *.db
 *.sqlite
 *.sqlite3
