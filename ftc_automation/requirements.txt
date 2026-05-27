@@ -1,0 +1,11 @@
+playwright>=1.40
+openai>=1.40
+flask>=3.0
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+sqlalchemy>=2.0
+pydantic>=2
+pyyaml
+python-dateutil
+beautifulsoup4

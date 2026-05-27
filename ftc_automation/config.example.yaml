@@ -1,0 +1,61 @@
+# Copy this file to config.yaml and fill in your real values.
+# config.yaml is git-ignored.
+
+# The Google Voice number that received the spam calls. Digits only, no
+# punctuation, used as #PhoneTextBox on the FTC form.
+gv_number: "5555550100"
+
+# Personal information the FTC form requires on step 2.
+personal:
+  first_name: "Jane"
+  last_name: "Doe"
+  street_address: "123 Main St"
+  city: "San Diego"
+  state: "CA"        # two-letter USPS code, matches StateDropDownList values
+  zip_code: "92101"
+
+# OpenAI configuration. The API key can also be supplied via the
+# OPENAI_API_KEY environment variable, which takes precedence.
+openai:
+  api_key: ""        # leave blank to use the env var
+  model: "gpt-4o-mini"
+
+# Gmail watcher options.
+gmail:
+  # Path to OAuth client secret JSON downloaded from Google Cloud console.
+  client_secret_path: "secrets/gmail_client_secret.json"
+  # Token cache written after the first OAuth handshake.
+  token_path: "secrets/gmail_token.json"
+  # Gmail search query used to find new Google Voice voicemail emails.
+  query: "from:voice-noreply@google.com newer_than:30d"
+
+# Playwright Google Voice scraper options.
+google_voice:
+  # Path to a Playwright storage_state JSON. Run `python -m ftc_automation
+  # login` once to create it interactively.
+  storage_state_path: "secrets/gv_storage_state.json"
+  # Hard cap on the number of voicemail threads to walk per run.
+  max_threads: 5000
+
+# Database location, relative to the ftc_automation package root.
+database:
+  path: "voicemails.db"
+
+# FTC submitter options.
+ftc:
+  # donotcall.gov report URL.
+  url: "https://www.donotcall.gov/report.html"
+  # Run the browser headed so you can watch / intervene. Set to true in
+  # production once you trust the pipeline.
+  headless: false
+  # Seconds to sleep between successive submissions (jittered +/- 50%).
+  submit_interval_sec: 20
+  # Directory to drop per-submission audit screenshots.
+  screenshot_dir: "submissions"
+
+# Review UI options.
+review:
+  host: "127.0.0.1"
+  port: 5000
+  # Auto-approve threshold for the bulk "approve high-confidence" action.
+  bulk_approve_min_confidence: 0.9

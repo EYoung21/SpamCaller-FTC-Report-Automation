@@ -1,0 +1,155 @@
+"""Command-line entry point.
+
+Run as a module from the project root:
+
+    python -m ftc_automation login
+    python -m ftc_automation ingest --backlog
+    python -m ftc_automation ingest --gmail
+    python -m ftc_automation classify [--limit N] [--reclassify]
+    python -m ftc_automation review
+    python -m ftc_automation submit [--once] [--limit N]
+    python -m ftc_automation status
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from typing import Iterable, Optional
+
+from .ftc.config import AppConfig, load_config
+
+
+log = logging.getLogger(__name__)
+
+
+def _configure_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+
+def _cmd_login(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .ftc.ingest.gv_playwright import interactive_login
+
+    interactive_login(cfg.resolve_path(cfg.google_voice.storage_state_path))
+    return 0
+
+
+def _cmd_ingest(cfg: AppConfig, args: argparse.Namespace) -> int:
+    did_anything = False
+    if args.backlog:
+        from .ftc.ingest.gv_playwright import scrape_backlog
+
+        scrape_backlog(cfg)
+        did_anything = True
+    if args.gmail:
+        from .ftc.ingest.gmail_watcher import ingest_gmail
+
+        ingest_gmail(cfg)
+        did_anything = True
+    if not did_anything:
+        log.error("ingest: choose at least one of --backlog or --gmail")
+        return 2
+    return 0
+
+
+def _cmd_classify(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .ftc.classify.openai_classifier import classify_pending
+
+    classify_pending(cfg, limit=args.limit, reclassify=args.reclassify)
+    return 0
+
+
+def _cmd_review(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .ftc.review.app import create_app
+
+    app = create_app(cfg)
+    host = args.host or cfg.review.host
+    port = args.port or cfg.review.port
+    log.info("Starting review UI on http://%s:%s", host, port)
+    app.run(host=host, port=port, debug=False)
+    return 0
+
+
+def _cmd_submit(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .ftc.submit.ftc_playwright import submit_approved
+
+    submit_approved(cfg, once=args.once, limit=args.limit)
+    return 0
+
+
+def _cmd_status(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from sqlalchemy import func, select
+
+    from .ftc.db import Voicemail, init_db, session_scope
+
+    init_db(cfg.resolve_path(cfg.database.path))
+    with session_scope() as session:
+        rows = session.execute(
+            select(Voicemail.status, func.count())
+            .group_by(Voicemail.status)
+            .order_by(Voicemail.status)
+        ).all()
+        total = sum(c for _, c in rows)
+        print(f"{'STATUS':<20} {'COUNT':>8}")
+        print("-" * 30)
+        for status, count in rows:
+            print(f"{status:<20} {count:>8}")
+        print("-" * 30)
+        print(f"{'TOTAL':<20} {total:>8}")
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ftc_automation")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("login", help="Interactive Google Voice login (saves storage_state.json)")
+
+    p_ing = sub.add_parser("ingest", help="Ingest voicemails into the DB")
+    p_ing.add_argument("--backlog", action="store_true", help="Playwright sweep of voice.google.com")
+    p_ing.add_argument("--gmail", action="store_true", help="Pull forwarded VM emails from Gmail")
+
+    p_cls = sub.add_parser("classify", help="Run OpenAI classifier over pending voicemails")
+    p_cls.add_argument("--limit", type=int, default=None)
+    p_cls.add_argument("--reclassify", action="store_true", help="Also re-run on already-classified rows")
+
+    p_rev = sub.add_parser("review", help="Launch Flask review UI")
+    p_rev.add_argument("--host", default=None)
+    p_rev.add_argument("--port", type=int, default=None)
+
+    p_sub = sub.add_parser("submit", help="Submit approved voicemails to donotcall.gov")
+    p_sub.add_argument("--once", action="store_true", help="Drain queue once and exit (default loops)")
+    p_sub.add_argument("--limit", type=int, default=None)
+
+    sub.add_parser("status", help="Print pipeline counts")
+
+    return parser
+
+
+_DISPATCH = {
+    "login": _cmd_login,
+    "ingest": _cmd_ingest,
+    "classify": _cmd_classify,
+    "review": _cmd_review,
+    "submit": _cmd_submit,
+    "status": _cmd_status,
+}
+
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    _configure_logging(args.verbose)
+    cfg = load_config()
+    handler = _DISPATCH[args.cmd]
+    return handler(cfg, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

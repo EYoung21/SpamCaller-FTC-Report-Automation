@@ -1,0 +1,161 @@
+{% extends "_base.html" %}
+{% block title %}Review VM #{{ vm.id }}{% endblock %}
+{% block body %}
+<style>
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h3 { margin: 0 0 10px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .meta { display: grid; grid-template-columns: 110px 1fr; row-gap: 6px; font-size: 14px; }
+  .meta dt { color: var(--muted); }
+  .transcript {
+    white-space: pre-wrap; background: var(--panel-2); padding: 12px; border-radius: 6px;
+    font-size: 14px; line-height: 1.55; max-height: 420px; overflow: auto;
+  }
+  label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  input[type=text], select, textarea {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 8px 10px; font-size: 14px; width: 100%;
+  }
+  textarea { font-family: inherit; resize: vertical; min-height: 140px; }
+  .field { margin-bottom: 12px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .actions {
+    position: sticky; bottom: 0; background: var(--panel);
+    border-top: 1px solid var(--border); padding: 12px 0; margin-top: 18px;
+    display: flex; gap: 10px; justify-content: space-between; align-items: center;
+  }
+  .actions .right { display: flex; gap: 10px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .counter { color: var(--muted); font-size: 12px; text-align: right; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    background: var(--panel-2); color: var(--muted); font-size: 12px; margin-left: 6px;
+  }
+  .badge.spam { background: #4a1f1d; color: #ffb1ad; }
+  .badge.notspam { background: #1e4a32; color: #b3ffd3; }
+  .nav-arrows a { color: var(--muted); text-decoration: none; margin: 0 6px; }
+</style>
+
+<div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+  <h2 style="margin:0;">
+    VM #{{ vm.id }}
+    {% if vm.is_spam %}<span class="badge spam">spam</span>{% else %}<span class="badge notspam">not spam</span>{% endif %}
+    <span class="badge">conf {{ '%.2f' % (vm.confidence or 0) }}</span>
+  </h2>
+  <div class="nav-arrows">
+    {% if prev_id %}<a href="{{ url_for('view_vm', vm_id=prev_id) }}">&larr; prev (K)</a>{% endif %}
+    {% if next_id %}<a href="{{ url_for('view_vm', vm_id=next_id) }}">next (J) &rarr;</a>{% endif %}
+  </div>
+</div>
+
+<form method="post" action="{{ url_for('update_vm', vm_id=vm.id) }}">
+<div class="grid">
+  <section class="card">
+    <h3>Voicemail facts</h3>
+    <dl class="meta">
+      <dt>Source</dt><dd>{{ vm.source }} <span class="badge">{{ vm.source_msg_id }}</span></dd>
+      <dt>Received</dt><dd>{{ vm.received_at|fmt_dt }}</dd>
+      <dt>Duration</dt><dd>{{ vm.duration_sec|fmt_dur }}</dd>
+      <dt>Caller name</dt><dd>{{ vm.caller_display_name or '—' }}</dd>
+      {% if vm.audio_url %}<dt>Audio</dt><dd><a href="{{ url_for('audio', vm_id=vm.id) }}" target="_blank">open recording</a></dd>{% endif %}
+    </dl>
+    <h3 style="margin-top:14px;">Transcript</h3>
+    <div class="transcript">{{ vm.transcript or '(no transcript)' }}</div>
+  </section>
+
+  <section class="card">
+    <h3>FTC submission fields</h3>
+    <div class="row">
+      <div class="field">
+        <label for="caller_number">Caller number</label>
+        <input type="text" id="caller_number" name="caller_number" value="{{ vm.caller_number or '' }}" />
+      </div>
+      <div class="field">
+        <label for="callback_number">Callback number</label>
+        <input type="text" id="callback_number" name="callback_number" value="{{ vm.callback_number or '' }}" />
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="claimed_company">Claimed company / caller name</label>
+      <input type="text" id="claimed_company" name="claimed_company" value="{{ vm.claimed_company or '' }}" />
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="scam_category">Scam category (LLM enum)</label>
+        <select id="scam_category" name="scam_category">
+          {% for c in scam_categories %}
+            <option value="{{ c }}" {% if vm.scam_category == c %}selected{% endif %}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>FTC subject (auto-mapped)</label>
+        <input type="text" value="{{ vm.ftc_subject_id }} — {{ subject_labels.get(vm.ftc_subject_id, '?') }}" disabled />
+      </div>
+    </div>
+
+    <div class="field" id="other-subject-field" {% if vm.ftc_subject_id != 1 %}style="display:none"{% endif %}>
+      <label for="ftc_subject_text">"Other" free-text (only if subject = 1)</label>
+      <input type="text" id="ftc_subject_text" name="ftc_subject_text" value="{{ vm.ftc_subject_text or '' }}" />
+    </div>
+
+    <div class="field">
+      <label for="comment_text">FTC comment (CommentTextBox, max 1000 chars)</label>
+      <textarea id="comment_text" name="comment_text" maxlength="1000" oninput="updateCounter()">{{ vm.comment_text or '' }}</textarea>
+      <div class="counter"><span id="counter">{{ (vm.comment_text or '')|length }}</span> / 1000</div>
+    </div>
+  </section>
+</div>
+
+<div class="actions">
+  <div class="hint">Shortcuts: <b>A</b> approve · <b>R</b> reject · <b>S</b> skip · <b>J/K</b> next/prev</div>
+  <div class="right">
+    <button type="submit" name="action" value="save">Save edits</button>
+    <button type="submit" name="action" value="skip" class="btn-warn">Skip (S)</button>
+    <button type="submit" name="action" value="reject" class="btn-bad">Reject (R)</button>
+    <button type="submit" name="action" value="approve" class="btn-good">Approve &amp; queue (A)</button>
+  </div>
+</div>
+</form>
+
+<script>
+function updateCounter() {
+  const ta = document.getElementById('comment_text');
+  document.getElementById('counter').textContent = ta.value.length;
+}
+const cat = document.getElementById('scam_category');
+const otherField = document.getElementById('other-subject-field');
+cat.addEventListener('change', () => {
+  // The mapping happens server-side; we just hide/show "Other" free text optimistically.
+  // Anything not in the predefined map will map to subject 1 server-side.
+  const predefined = new Set([
+    "tax_relief","government_impersonation","irs_scam","social_security_scam",
+    "debt_consolidation","loan_offer","student_loan","credit_card",
+    "auto_warranty","home_warranty","medical","medicare","health_insurance",
+    "home_security","home_improvement","solar","utilities","energy",
+    "tech_support","lottery","sweepstakes","prize","vacation","timeshare",
+    "travel","investment","retirement","crypto","charity","political",
+    "dropped_call","unknown"
+  ]);
+  otherField.style.display = predefined.has(cat.value) ? 'none' : 'block';
+});
+
+document.addEventListener('keydown', (e) => {
+  if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) return;
+  if (e.key === 'j' || e.key === 'J') {
+    {% if next_id %}window.location = "{{ url_for('view_vm', vm_id=next_id) }}";{% endif %}
+  } else if (e.key === 'k' || e.key === 'K') {
+    {% if prev_id %}window.location = "{{ url_for('view_vm', vm_id=prev_id) }}";{% endif %}
+  } else if (e.key === 'a' || e.key === 'A') {
+    document.querySelector('button[value=approve]').click();
+  } else if (e.key === 'r' || e.key === 'R') {
+    document.querySelector('button[value=reject]').click();
+  } else if (e.key === 's' || e.key === 'S') {
+    document.querySelector('button[value=skip]').click();
+  }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}FTC Voicemail Review{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --panel-2: #1f232d;
+      --text: #e6e8ec;
+      --muted: #9aa3b2;
+      --accent: #5aa9ff;
+      --good: #4cc38a;
+      --warn: #f1a33a;
+      --bad: #e8554f;
+      --border: #2a2f3a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header.app {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    header.app h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    header.app nav a {
+      color: var(--muted);
+      text-decoration: none;
+      margin-left: 16px;
+      font-size: 13px;
+    }
+    header.app nav a:hover { color: var(--text); }
+    .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .flash {
+      padding: 8px 12px; margin-bottom: 12px; border-radius: 6px;
+      background: var(--panel-2); border-left: 3px solid var(--accent);
+      font-size: 14px;
+    }
+    .flash.success { border-left-color: var(--good); }
+    .flash.info    { border-left-color: var(--accent); }
+    .flash.error   { border-left-color: var(--bad); }
+    button, .btn {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover, .btn:hover { background: #262b36; }
+    .btn-good { background: #1e4a32; border-color: #2f6b4a; }
+    .btn-bad  { background: #4a1f1d; border-color: #6b2f2d; }
+    .btn-warn { background: #4a3a1d; border-color: #6b552f; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+<header class="app">
+  <h1>FTC Voicemail Spam Reporter</h1>
+  <nav>
+    <a href="{{ url_for('queue') }}">Queue</a>
+  </nav>
+</header>
+<main class="container">
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, m in msgs %}
+      <div class="flash {{ cat }}">{{ m }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block body %}{% endblock %}
+</main>
+</body>
+</html>

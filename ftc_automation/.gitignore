@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Local config & secrets — never commit
+config.yaml
+secrets/*
+!secrets/README.md
+!secrets/*.example.json
+!secrets/*.example.yaml
+*.db
+*.sqlite
+*.sqlite3
+
+# Audit screenshots from FTC submissions
+submissions/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+.playwright/
+
+# Virtual envs
+.venv/
+venv/
+env/

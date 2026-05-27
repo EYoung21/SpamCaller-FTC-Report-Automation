@@ -1,0 +1,84 @@
+{% extends "_base.html" %}
+{% block title %}Queue — FTC Voicemail Review{% endblock %}
+{% block body %}
+<style>
+  .summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .summary .pill {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+    padding: 6px 14px; font-size: 13px; color: var(--muted);
+  }
+  .summary .pill strong { color: var(--text); margin-right: 6px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: #1c2029; }
+  .conf-bar {
+    display: inline-block; width: 60px; height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden;
+  }
+  .conf-bar > span { display: block; height: 100%; background: var(--good); }
+  .truncate { max-width: 380px; color: var(--muted); }
+  .bulk-form {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px;
+    margin-bottom: 18px;
+  }
+  .bulk-form input[type=number] {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 6px 8px; border-radius: 4px; width: 70px;
+  }
+  .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+</style>
+
+<div class="summary">
+  <div class="pill"><strong>{{ counts.get('classified', 0) }}</strong>awaiting review</div>
+  <div class="pill"><strong>{{ counts.get('approved', 0) }}</strong>approved (queued)</div>
+  <div class="pill"><strong>{{ counts.get('rejected', 0) }}</strong>rejected</div>
+  <div class="pill"><strong>{{ counts.get('skipped', 0) }}</strong>skipped</div>
+</div>
+
+<form class="bulk-form" method="post" action="{{ url_for('bulk_approve') }}">
+  <span>Bulk approve everything in this queue at confidence &geq;</span>
+  <input type="number" min="0" max="1" step="0.01" name="min_confidence" value="{{ '%.2f' % bulk_min }}" />
+  <button type="submit" class="btn-good">Approve all</button>
+</form>
+
+{% if voicemails %}
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Caller</th>
+      <th>Received</th>
+      <th>Dur</th>
+      <th>Category</th>
+      <th>Conf</th>
+      <th>Summary</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for vm in voicemails %}
+    <tr>
+      <td>{{ vm.id }}</td>
+      <td>{{ vm.caller_number or vm.caller_display_name or '—' }}</td>
+      <td>{{ vm.received_at|fmt_dt }}</td>
+      <td>{{ vm.duration_sec|fmt_dur }}</td>
+      <td>{{ vm.scam_category or '—' }}</td>
+      <td>
+        <span class="conf-bar"><span style="width: {{ ((vm.confidence or 0) * 100)|round(0, 'floor') }}%"></span></span>
+        {{ '%.2f' % (vm.confidence or 0) }}
+      </td>
+      <td class="truncate">{{ vm.summary or vm.transcript[:120] if vm.transcript else '' }}</td>
+      <td><a class="btn" href="{{ url_for('view_vm', vm_id=vm.id) }}">Review &rarr;</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  <h2>Inbox zero.</h2>
+  <p>No classified spam voicemails are awaiting review.</p>
+</div>
+{% endif %}
+
+{% endblock %}
