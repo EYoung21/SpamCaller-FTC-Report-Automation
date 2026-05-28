@@ -188,7 +188,7 @@ The submitter targets the IDs that live in donotcall.gov's HTML today:
 | `#CallerPhoneNumberTextBox` | `caller_number` |
 | `#CallerNameTextBox` | `claimed_company` (LLM-extracted) |
 | `#HaveBusinessNoRadioButton` | always |
-| `#StopCallingNoRadioButton` | always |
+| `#StopCallingYesRadioButton` | always (on DNC / unwanted calls) |
 | `#FirstNameTextBox`, `#LastNameTextBox`, … | `personal.*` from config |
 | `#CommentTextBox` | `comment_text` (LLM-written, you can edit in UI) |
 

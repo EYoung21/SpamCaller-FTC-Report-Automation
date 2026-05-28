@@ -18,7 +18,7 @@ Step 2
   #CallerPhoneNumberTextBox      — the spammer's number
   #CallerNameTextBox             — company / person who called
   #HaveBusinessNoRadioButton     — "no business relationship"
-  #StopCallingNoRadioButton      — "no, I didn't ask them to stop"
+  #StopCallingYesRadioButton     — "yes, I asked them to stop calling"
   #FirstNameTextBox, #LastNameTextBox
   #StreetAddressTextBox, #CityTextBox, #StateDropDownList, #ZipCodeTextBox
   #CommentTextBox                — narrative
@@ -766,7 +766,7 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
         )
 
         _human_check(page, "#HaveBusinessNoRadioButton")
-        _human_check(page, "#StopCallingNoRadioButton")
+        _human_check(page, "#StopCallingYesRadioButton")
 
         _human_fill(page, "#FirstNameTextBox", p.first_name)
         _human_fill(page, "#LastNameTextBox", p.last_name)
