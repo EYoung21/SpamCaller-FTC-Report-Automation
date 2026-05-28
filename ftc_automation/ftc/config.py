@@ -108,6 +108,29 @@ class FtcSubmitterConfig(BaseModel):
     headless: bool = False
     submit_interval_sec: float = 20.0
     screenshot_dir: str = "submissions"
+    # Optional HTTP(S) proxies so Playwright exits via a different IP.
+    # Examples:
+    #   - "http://user:pass@proxy.example.com:8080"
+    #   - "socks5://127.0.0.1:1080"   (local VPN client)
+    # Comma-separated list also accepted via FTC_PROXIES env var.
+    proxies: list[str] = Field(default_factory=list)
+    # Optional file with one proxy URL per line (gitignored). Merged with
+    # ``proxies`` above. Run ``python scripts/fetch_proxies.py`` to populate.
+    proxy_file: str = "secrets/proxies.txt"
+    # When to pick the next proxy from ``proxies``:
+    #   on_throttle — after a throttle response (default; good for scheduled retries)
+    #   each_run    — at the start of every ``submit --once`` invocation
+    #   each_submit — between every complaint in a batch
+    proxy_rotate: str = "on_throttle"
+
+    @field_validator("proxy_rotate")
+    @classmethod
+    def _validate_proxy_rotate(cls, v: str) -> str:
+        allowed = {"on_throttle", "each_run", "each_submit"}
+        v = (v or "on_throttle").strip().lower()
+        if v not in allowed:
+            raise ValueError(f"proxy_rotate must be one of {sorted(allowed)}")
+        return v
 
 
 class ReviewConfig(BaseModel):
@@ -170,7 +193,33 @@ def load_config(path: Optional[Path | str] = None, *, force: bool = False) -> Ap
     with path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
 
+    # Optional comma-separated proxy list from the environment (secrets stay
+    # out of config.yaml).
+    env_proxies = os.environ.get("FTC_PROXIES", "").strip()
+    if env_proxies:
+        from_env = [p.strip() for p in env_proxies.split(",") if p.strip()]
+        ftc = raw.setdefault("ftc", {})
+        existing = ftc.get("proxies") or []
+        ftc["proxies"] = list(dict.fromkeys([*existing, *from_env]))
+
     cfg = AppConfig.model_validate(raw)
+
+    # Merge proxies from optional file (one URL per line, # comments ok).
+    proxy_file = os.environ.get("FTC_PROXY_FILE") or cfg.ftc.proxy_file
+    if proxy_file:
+        pf = Path(proxy_file)
+        if not pf.is_absolute():
+            pf = PACKAGE_ROOT / pf
+        if pf.exists():
+            from_file = [
+                ln.strip()
+                for ln in pf.read_text(encoding="utf-8").splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            ]
+            if from_file:
+                merged = list(dict.fromkeys([*cfg.ftc.proxies, *from_file]))
+                cfg.ftc.proxies = merged
+
     if path == DEFAULT_CONFIG_PATH or path == Path(os.environ.get("FTC_CONFIG_PATH", "")):
         _cached = cfg
     return cfg

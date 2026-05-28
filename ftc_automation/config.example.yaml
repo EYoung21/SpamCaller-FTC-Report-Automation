@@ -52,6 +52,14 @@ ftc:
   submit_interval_sec: 20
   # Directory to drop per-submission audit screenshots.
   screenshot_dir: "submissions"
+  # Optional: route Playwright through different IPs (see README). Leave
+  # empty to use your normal network connection.
+  # proxies:
+  #   - "http://user:pass@proxy.example.com:8080"
+  #   - "socks5://127.0.0.1:1080"
+  # Or set FTC_PROXIES="http://...,socks5://..." in .env
+  # proxy_file: secrets/proxies.txt   # one URL per line; run scripts/fetch_proxies.py
+  # proxy_rotate: on_throttle   # on_throttle | each_run | each_submit
 
 # Review UI options.
 review:

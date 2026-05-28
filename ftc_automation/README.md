@@ -197,6 +197,59 @@ There isn't one today, but the submitter detects an
 `iframe[src*="recaptcha"]`. If it ever appears, the row stays in
 `approved` and an error is logged so you can intervene manually.
 
+### Getting past FTC throttling
+
+`donotcall.gov` rate-limits by IP after bursts. The submitter detects
+the "system difficulties" page and stops the batch instead of burning
+through your queue.
+
+**Easiest fix (no config):** connect the laptop to a **phone hotspot**
+so your IP changes, then run `python -m ftc_automation submit --once`.
+
+**Automated proxy rotation:** add one or more proxies under `ftc.proxies`
+in `config.yaml`, or set a comma-separated list in `.env`:
+
+```
+FTC_PROXIES=http://user:pass@proxy1.example.com:8080,socks5://127.0.0.1:1080
+```
+
+Rotation modes (`ftc.proxy_rotate`):
+
+| Mode | Behavior |
+| --- | --- |
+| `on_throttle` (default) | After a throttle, rotate proxy and retry once; next scheduled run also starts on the next proxy |
+| `each_run` | Every `submit --once` invocation uses the next proxy |
+| `each_submit` | Rotate between every successful complaint in a batch |
+
+You need real proxy endpoints — the code cannot invent new IPs. Options:
+
+- **Phone hotspot** — toggling hotspot on/off changes IP with zero config
+- **VPN client with local SOCKS** — e.g. `socks5://127.0.0.1:1080` while connected; switch VPN server between runs
+- **Residential proxy service** — paid providers (Webshare, etc.) give you a list of `http://user:pass@host:port` URLs
+
+Datacenter/free VPN IPs often get blocked faster than your home IP.
+
+**Auto-fetch free proxies (experimental, often dead):**
+
+```powershell
+python scripts/fetch_proxies.py --test 80 --country ALL --socks5
+```
+
+Working endpoints land in `secrets/proxies.txt` and load automatically via
+`ftc.proxy_file`. **Do not file real complaints through untrusted free
+proxies** — they can read your mom's name/address on the form. Hotspot or
+paid residential is safer.
+
+**There is no magic IP spoof without a network path.** Options ranked:
+
+| Method | Cost | Works for FTC? |
+| --- | --- | --- |
+| Phone hotspot | Free | Best free option — new mobile IP |
+| VPN → local SOCKS in `proxies.txt` | ~$5/mo | Good if you switch servers between runs |
+| Paid residential proxy | ~$2–5 trial | Best for automation at scale |
+| Free public proxy lists | Free | Usually dead; security risk for PII |
+| "Fake IP in code" | — | **Impossible** without one of the above |
+
 ---
 
 ## Cost & throughput

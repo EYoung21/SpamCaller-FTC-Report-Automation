@@ -20,6 +20,7 @@ class SubmissionResult:
     screenshot_path: Optional[str] = None
     captcha_detected: bool = False
     throttled: bool = False
+    response_url: Optional[str] = None
 
 
 class FtcSubmitter(abc.ABC):
