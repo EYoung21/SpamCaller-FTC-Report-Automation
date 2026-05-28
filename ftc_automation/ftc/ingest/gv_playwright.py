@@ -255,9 +255,16 @@ def _parse_timestamp(raw: Optional[str]) -> Optional[datetime]:
         return None
     raw = raw.strip()
     try:
-        return dateparser.parse(raw, fuzzy=True)
+        dt = dateparser.parse(raw, fuzzy=True)
     except (ValueError, OverflowError):
         return None
+    if dt is None:
+        return None
+    now = datetime.now()
+    if dt > now:
+        log.warning("GV timestamp %r parsed as future %s — clamping to now.", raw, dt)
+        return now
+    return dt
 
 
 def _parse_duration(raw: Optional[str]) -> Optional[int]:

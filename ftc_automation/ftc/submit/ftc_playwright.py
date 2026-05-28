@@ -213,6 +213,25 @@ def _format_time_dropdown(hour: int) -> str:
     return f"{hour:02d}"
 
 
+def _call_datetime_for_ftc(received_at: datetime) -> datetime:
+    """Return a naive datetime safe for donotcall.gov (not after today)."""
+    ts = received_at
+    now = datetime.now()
+    if ts.date() > now.date():
+        log.warning(
+            "received_at %s is after today (%s) — clamping date for FTC.",
+            received_at,
+            now.strftime("%m/%d/%Y"),
+        )
+        ts = ts.replace(year=now.year, month=now.month, day=now.day)
+    if ts > now:
+        ts = now
+    min_dt = datetime(2003, 10, 1)
+    if ts < min_dt:
+        ts = min_dt
+    return ts
+
+
 def _human_pause(page, min_ms: int = 120, max_ms: int = 420) -> None:
     page.wait_for_timeout(random.randint(min_ms, max_ms))
 
@@ -703,7 +722,7 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
         subject_text: Optional[str] = None,
     ) -> None:
         gv = _digits(self.cfg.gv_number)
-        ts: datetime = vm.received_at  # type: ignore[assignment]
+        ts = _call_datetime_for_ftc(vm.received_at)  # type: ignore[arg-type]
 
         _reliable_fill(page, "#PhoneTextBox", gv)
         _reliable_fill(page, "#DateOfCallTextBox", ts.strftime("%m/%d/%Y"))
