@@ -221,6 +221,27 @@ def _classify_post_submit(page) -> tuple[bool, bool, str]:
     return False, False, f"success panel missing (url={url})"
 
 
+def _is_proxy_network_error(error: Optional[str]) -> bool:
+    if not error:
+        return False
+    err = error.lower()
+    return any(
+        token in err
+        for token in (
+            "err_timed_out",
+            "err_proxy",
+            "err_tunnel",
+            "err_connection",
+            "net::err_",
+            "econnrefused",
+            "econnreset",
+            "timed out",
+            "timeouterror",
+            "timeout 30000ms exceeded",
+        )
+    )
+
+
 def _format_minutes_dropdown(minute: int) -> str:
     # Round to nearest 5 since dropdown options are typically 00/05/10/.../55.
     snapped = (minute // 5) * 5
@@ -708,6 +729,57 @@ def submit_approved(
                     if submitter._proxy_rotator and submitter._proxy_rotator.mode == "each_submit":
                         submitter.rotate_after_successful_submit()
                 else:
+                    if (
+                        _is_proxy_network_error(result.error)
+                        and submitter._proxy_rotator is not None
+                        and len(submitter._proxy_rotator.proxies) > 1
+                    ):
+                        log.warning(
+                            "VM %s proxy/network error (%s). Rotating and retrying once…",
+                            vm.id,
+                            result.error,
+                        )
+                        submitter.restart_with_next_proxy()
+                        retry = submitter.submit(vm)
+                        if retry.success:
+                            vm.status = STATUS_SUBMITTED
+                            vm.submitted_at = datetime.utcnow()
+                            vm.submit_error = None
+                            vm.submit_screenshot = retry.screenshot_path
+                            successes += 1
+                            log.info(
+                                "VM %s submitted successfully after proxy rotate.",
+                                vm.id,
+                            )
+                            processed += 1
+                            if submitter._proxy_rotator.mode == "each_submit":
+                                submitter.rotate_after_successful_submit()
+                            continue
+                        if retry.throttled:
+                            vm.submit_error = retry.error
+                            vm.submit_screenshot = retry.screenshot_path
+                            result = retry
+                        elif _is_proxy_network_error(retry.error):
+                            vm.submit_error = retry.error
+                            vm.submit_screenshot = retry.screenshot_path
+                            log.warning(
+                                "VM %s still unreachable after proxy rotate; "
+                                "leaving approved for next run.",
+                                vm.id,
+                            )
+                            processed += 1
+                            continue
+                        else:
+                            vm.status = STATUS_SUBMIT_FAILED
+                            vm.submit_error = retry.error
+                            vm.submit_screenshot = retry.screenshot_path
+                            log.error(
+                                "VM %s failed after proxy rotate: %s",
+                                vm.id,
+                                retry.error,
+                            )
+                            processed += 1
+                            continue
                     vm.status = STATUS_SUBMIT_FAILED
                     vm.submit_error = result.error
                     vm.submit_screenshot = result.screenshot_path

@@ -1,7 +1,7 @@
-# Registers an hourly Windows Scheduled Task that runs the FTC submitter.
+# Registers a recurring Windows Scheduled Task that runs the FTC submitter.
 #
 # Task behaviour:
-#   * Triggers every 1 hour, indefinitely, starting 5 minutes from now.
+#   * Triggers every N minutes (default 30), indefinitely, starting 5 minutes from now.
 #   * Runs whether the user is logged in or not, in the background
 #     (no visible window). Playwright launches Chrome headless from the
 #     submitter itself.
@@ -12,12 +12,17 @@
 #
 # Re-running this script overwrites the existing task with the new
 # settings, so it's safe to tweak and re-install.
+#
+# Examples:
+#   .\install_scheduled_task.ps1                          # every 30 min
+#   .\install_scheduled_task.ps1 -IntervalMinutes 15      # every 15 min
+#   .\install_scheduled_task.ps1 -IntervalMinutes 60      # hourly
 
 [CmdletBinding()]
 param(
     [string]$TaskName = "FTCReportAutomation-HourlySubmit",
     [string]$RepoRoot = "C:\Users\hello\Documents\FTCReportAutomation",
-    [int]$IntervalMinutes = 60
+    [int]$IntervalMinutes = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,7 +48,8 @@ $startTime = (Get-Date).AddMinutes(5)
 $trigger = New-ScheduledTaskTrigger `
     -Once `
     -At $startTime `
-    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -70,7 +76,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Hourly retry of FTC do-not-call submissions for any voicemails that are queued but not yet filed. Logs append to logs/auto_submit.log." | Out-Null
+    -Description "Recurring retry of FTC do-not-call submissions for any voicemails that are queued but not yet filed. Logs append to logs/auto_submit.log." | Out-Null
 
 Write-Host ""
 Write-Host "Task installed."
