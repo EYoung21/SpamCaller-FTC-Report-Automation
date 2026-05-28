@@ -6,7 +6,11 @@
   .summary .pill {
     background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
     padding: 6px 14px; font-size: 13px; color: var(--muted);
+    text-decoration: none;
   }
+  .summary .pill:hover { background: #1c2029; color: var(--text); }
+  .summary .pill.active { background: var(--accent); color: #061322; border-color: var(--accent); }
+  .summary .pill.active strong { color: #061322; }
   .summary .pill strong { color: var(--text); margin-right: 6px; }
   table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
   th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
@@ -30,17 +34,36 @@
 </style>
 
 <div class="summary">
-  <div class="pill"><strong>{{ counts.get('classified', 0) }}</strong>awaiting review</div>
-  <div class="pill"><strong>{{ counts.get('approved', 0) }}</strong>approved (queued)</div>
-  <div class="pill"><strong>{{ counts.get('rejected', 0) }}</strong>rejected</div>
-  <div class="pill"><strong>{{ counts.get('skipped', 0) }}</strong>skipped</div>
+  <a class="pill {% if view == 'new' %}active{% endif %}" href="{{ url_for('queue', view='new') }}">
+    <strong>{{ counts.get('classified', 0) }}</strong>awaiting review
+  </a>
+  <a class="pill {% if view == 'skipped' %}active{% endif %}" href="{{ url_for('queue', view='skipped') }}">
+    <strong>{{ counts.get('skipped', 0) }}</strong>skipped
+  </a>
+  <a class="pill {% if view == 'approved' %}active{% endif %}" href="{{ url_for('queue', view='approved') }}">
+    <strong>{{ counts.get('approved', 0) }}</strong>approved (queued)
+  </a>
+  <a class="pill {% if view == 'rejected' %}active{% endif %}" href="{{ url_for('queue', view='rejected') }}">
+    <strong>{{ counts.get('rejected', 0) }}</strong>rejected
+  </a>
+  <a class="pill {% if view == 'submitted' %}active{% endif %}" href="{{ url_for('queue', view='submitted') }}">
+    <strong>{{ counts.get('submitted', 0) }}</strong>submitted
+  </a>
+  <a class="pill {% if view == 'failed' %}active{% endif %}" href="{{ url_for('queue', view='failed') }}">
+    <strong>{{ counts.get('submit_failed', 0) }}</strong>failed
+  </a>
+  <a class="pill {% if view == 'all_spam' %}active{% endif %}" href="{{ url_for('queue', view='all_spam') }}">all spam</a>
 </div>
 
+<h2 style="margin: 0 0 8px 0;">{{ view_labels[view] }}</h2>
+
+{% if view == 'new' %}
 <form class="bulk-form" method="post" action="{{ url_for('bulk_approve') }}">
   <span>Bulk approve everything in this queue at confidence &geq;</span>
   <input type="number" min="0" max="1" step="0.01" name="min_confidence" value="{{ '%.2f' % bulk_min }}" />
   <button type="submit" class="btn-good">Approve all</button>
 </form>
+{% endif %}
 
 {% if voicemails %}
 <table>
@@ -69,7 +92,7 @@
         {{ '%.2f' % (vm.confidence or 0) }}
       </td>
       <td class="truncate">{{ vm.summary or vm.transcript[:120] if vm.transcript else '' }}</td>
-      <td><a class="btn" href="{{ url_for('view_vm', vm_id=vm.id) }}">Review &rarr;</a></td>
+      <td><a class="btn" href="{{ url_for('view_vm', vm_id=vm.id, view=view) }}">Review &rarr;</a></td>
     </tr>
     {% endfor %}
   </tbody>

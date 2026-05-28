@@ -13,11 +13,21 @@ __pycache__/
 .env.*
 !.env.example
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
 # Audit screenshots from FTC submissions
 **/submissions/
+
+# Local-only voicemail recordings (private; downloaded from your GV account)
+**/audio/
+
+# Auto-submit + ad-hoc debug logs
+logs/
+debug_*.log
+*.debug.log
 
 # Playwright artifacts
 test-results/

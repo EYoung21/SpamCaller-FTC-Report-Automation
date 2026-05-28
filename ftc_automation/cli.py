@@ -44,12 +44,12 @@ def _cmd_ingest(cfg: AppConfig, args: argparse.Namespace) -> int:
     if args.backlog:
         from .ftc.ingest.gv_playwright import scrape_backlog
 
-        scrape_backlog(cfg)
+        scrape_backlog(cfg, limit=args.limit)
         did_anything = True
     if args.gmail:
         from .ftc.ingest.gmail_watcher import ingest_gmail
 
-        ingest_gmail(cfg)
+        ingest_gmail(cfg, max_messages=args.limit or 500)
         did_anything = True
     if not did_anything:
         log.error("ingest: choose at least one of --backlog or --gmail")
@@ -79,6 +79,13 @@ def _cmd_submit(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .ftc.submit.ftc_playwright import submit_approved
 
     submit_approved(cfg, once=args.once, limit=args.limit)
+    return 0
+
+
+def _cmd_rescrape_audio(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .ftc.ingest.gv_audio import rescrape_audio
+
+    rescrape_audio(cfg, only_spam=not args.all, limit=args.limit)
     return 0
 
 
@@ -114,6 +121,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ing = sub.add_parser("ingest", help="Ingest voicemails into the DB")
     p_ing.add_argument("--backlog", action="store_true", help="Playwright sweep of voice.google.com")
     p_ing.add_argument("--gmail", action="store_true", help="Pull forwarded VM emails from Gmail")
+    p_ing.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Cap how many threads/emails to ingest this run (good for smoke tests).",
+    )
 
     p_cls = sub.add_parser("classify", help="Run OpenAI classifier over pending voicemails")
     p_cls.add_argument("--limit", type=int, default=None)
@@ -127,6 +140,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sub.add_argument("--once", action="store_true", help="Drain queue once and exit (default loops)")
     p_sub.add_argument("--limit", type=int, default=None)
 
+    p_aud = sub.add_parser(
+        "rescrape-audio",
+        help="One-time pass to download voicemail audio files via Playwright",
+    )
+    p_aud.add_argument(
+        "--all",
+        action="store_true",
+        help="Fetch audio for every row missing it (default: only spam-flagged classified rows)",
+    )
+    p_aud.add_argument("--limit", type=int, default=None, help="Cap how many rows to process")
+
     sub.add_parser("status", help="Print pipeline counts")
 
     return parser
@@ -138,6 +162,7 @@ _DISPATCH = {
     "classify": _cmd_classify,
     "review": _cmd_review,
     "submit": _cmd_submit,
+    "rescrape-audio": _cmd_rescrape_audio,
     "status": _cmd_status,
 }
 

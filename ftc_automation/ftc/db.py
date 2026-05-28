@@ -194,12 +194,57 @@ def upsert_voicemail(
     fields on it are filled in from ``defaults`` but existing values are
     preserved (so reclassification or re-review aren't clobbered by a
     repeat ingest).
+
+    Also matches existing rows by ``(source, caller_number, received_at)``
+    as a fallback — this handles the case where the source_msg_id scheme
+    changed between ingest runs (e.g. fixing a bug) but the underlying
+    voicemail is the same. Without this, the second ingest would create
+    a phantom duplicate.
     """
     existing = (
         session.query(Voicemail)
         .filter(Voicemail.source == source, Voicemail.source_msg_id == source_msg_id)
         .one_or_none()
     )
+
+    # Fallback dedupe: same source + same caller + same received_at.
+    if existing is None and defaults:
+        nat_number = defaults.get("caller_number")
+        nat_received = defaults.get("received_at")
+        nat_name = defaults.get("caller_display_name")
+        nat_transcript = (defaults.get("transcript") or "")[:40]
+        if nat_received is not None:
+            q = session.query(Voicemail).filter(
+                Voicemail.source == source,
+                Voicemail.received_at == nat_received,
+            )
+            if nat_number:
+                q = q.filter(Voicemail.caller_number == nat_number)
+            elif nat_name:
+                q = q.filter(Voicemail.caller_display_name == nat_name)
+            elif nat_transcript:
+                # Anonymous/unknown caller: fall back to first-40-char snippet
+                # so we still catch duplicates of the same recording.
+                pass
+
+            candidates = q.all()
+            if nat_transcript:
+                # Among rows with the same received_at + caller, prefer one
+                # whose transcript starts the same way.
+                for c in candidates:
+                    if (c.transcript or "")[:40] == nat_transcript:
+                        existing = c
+                        break
+                else:
+                    existing = candidates[0] if candidates else None
+            else:
+                existing = candidates[0] if candidates else None
+
+            # Migrate the legacy source_msg_id over so future ingests match
+            # on the primary key.
+            if existing is not None and existing.source_msg_id != source_msg_id:
+                existing.source_msg_id = source_msg_id
+
     if existing is not None:
         if defaults:
             changed = False

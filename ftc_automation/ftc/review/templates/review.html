@@ -39,17 +39,20 @@
 
 <div style="display:flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
   <h2 style="margin:0;">
+    <a href="{{ url_for('queue', view=view) }}" style="color: var(--muted); text-decoration: none;">&larr;</a>
     VM #{{ vm.id }}
+    <span class="badge">{{ vm.status }}</span>
     {% if vm.is_spam %}<span class="badge spam">spam</span>{% else %}<span class="badge notspam">not spam</span>{% endif %}
     <span class="badge">conf {{ '%.2f' % (vm.confidence or 0) }}</span>
   </h2>
   <div class="nav-arrows">
-    {% if prev_id %}<a href="{{ url_for('view_vm', vm_id=prev_id) }}">&larr; prev (K)</a>{% endif %}
-    {% if next_id %}<a href="{{ url_for('view_vm', vm_id=next_id) }}">next (J) &rarr;</a>{% endif %}
+    {% if prev_id %}<a href="{{ url_for('view_vm', vm_id=prev_id, view=view) }}">&larr; prev (K)</a>{% endif %}
+    {% if next_id %}<a href="{{ url_for('view_vm', vm_id=next_id, view=view) }}">next (J) &rarr;</a>{% endif %}
   </div>
 </div>
 
 <form method="post" action="{{ url_for('update_vm', vm_id=vm.id) }}">
+<input type="hidden" name="view" value="{{ view }}" />
 <div class="grid">
   <section class="card">
     <h3>Voicemail facts</h3>
@@ -58,8 +61,29 @@
       <dt>Received</dt><dd>{{ vm.received_at|fmt_dt }}</dd>
       <dt>Duration</dt><dd>{{ vm.duration_sec|fmt_dur }}</dd>
       <dt>Caller name</dt><dd>{{ vm.caller_display_name or '—' }}</dd>
-      {% if vm.audio_url %}<dt>Audio</dt><dd><a href="{{ url_for('audio', vm_id=vm.id) }}" target="_blank">open recording</a></dd>{% endif %}
     </dl>
+    {% if vm.audio_url %}
+      <div style="margin-top:14px;">
+        <audio controls preload="none" style="width:100%;"
+               src="{{ url_for('audio', vm_id=vm.id) }}"></audio>
+      </div>
+    {% endif %}
+    <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+      <a class="btn" target="_blank" rel="noopener"
+         href="https://voice.google.com/u/0/voicemail">
+        Open Google Voice inbox &#x2197;
+      </a>
+    </div>
+    {% if not vm.audio_url %}
+      <p class="hint" style="margin-top:6px;">
+        Inline playback requires a one-time audio re-scrape. Run
+        <code>python -m ftc_automation rescrape-audio</code> to fetch mp3s for
+        every spam-flagged voicemail. Until then, use the button above to find
+        this one in GV (received <strong>{{ vm.received_at|fmt_dt }}</strong>
+        from <strong>{{ vm.caller_number or '(unknown)' }}</strong>).
+      </p>
+    {% endif %}
+
     <h3 style="margin-top:14px;">Transcript</h3>
     <div class="transcript">{{ vm.transcript or '(no transcript)' }}</div>
   </section>
@@ -111,12 +135,22 @@
 </div>
 
 <div class="actions">
-  <div class="hint">Shortcuts: <b>A</b> approve · <b>R</b> reject · <b>S</b> skip · <b>J/K</b> next/prev</div>
+  <div class="hint">
+    Shortcuts: <b>A</b> approve · <b>R</b> reject · <b>S</b> skip · <b>J/K</b> next/prev
+    {% if vm.status in ('skipped', 'rejected', 'approved', 'submit_failed') %}
+      · <b>U</b> put back in queue
+    {% endif %}
+  </div>
   <div class="right">
     <button type="submit" name="action" value="save">Save edits</button>
-    <button type="submit" name="action" value="skip" class="btn-warn">Skip (S)</button>
-    <button type="submit" name="action" value="reject" class="btn-bad">Reject (R)</button>
-    <button type="submit" name="action" value="approve" class="btn-good">Approve &amp; queue (A)</button>
+    {% if vm.status in ('skipped', 'rejected', 'approved', 'submit_failed') %}
+      <button type="submit" name="action" value="unskip" class="btn-good">Put back in queue (U)</button>
+    {% endif %}
+    {% if vm.status == 'classified' %}
+      <button type="submit" name="action" value="skip" class="btn-warn">Skip (S)</button>
+      <button type="submit" name="action" value="reject" class="btn-bad">Reject (R)</button>
+      <button type="submit" name="action" value="approve" class="btn-good">Approve &amp; queue (A)</button>
+    {% endif %}
   </div>
 </div>
 </form>
@@ -150,11 +184,17 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'k' || e.key === 'K') {
     {% if prev_id %}window.location = "{{ url_for('view_vm', vm_id=prev_id) }}";{% endif %}
   } else if (e.key === 'a' || e.key === 'A') {
-    document.querySelector('button[value=approve]').click();
+    const btn = document.querySelector('button[value=approve]');
+    if (btn) btn.click();
   } else if (e.key === 'r' || e.key === 'R') {
-    document.querySelector('button[value=reject]').click();
+    const btn = document.querySelector('button[value=reject]');
+    if (btn) btn.click();
   } else if (e.key === 's' || e.key === 'S') {
-    document.querySelector('button[value=skip]').click();
+    const btn = document.querySelector('button[value=skip]');
+    if (btn) btn.click();
+  } else if (e.key === 'u' || e.key === 'U') {
+    const btn = document.querySelector('button[value=unskip]');
+    if (btn) btn.click();
   }
 });
 </script>

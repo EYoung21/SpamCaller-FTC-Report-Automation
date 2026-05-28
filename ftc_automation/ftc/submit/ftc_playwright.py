@@ -79,11 +79,58 @@ def _format_minutes_dropdown(minute: int) -> str:
 class FtcPlaywrightSubmitter(FtcSubmitter):
     cfg: AppConfig
 
+    def __post_init__(self) -> None:
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._page = None
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def __enter__(self) -> "FtcPlaywrightSubmitter":
+        self.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.stop()
+
+    def start(self) -> None:
+        """Launch a single browser to be reused across submissions."""
+        if self._browser is not None:
+            return
+        try:
+            from playwright.sync_api import sync_playwright  # type: ignore
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(f"Playwright not installed: {exc}") from exc
+
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(headless=self.cfg.ftc.headless)
+        self._context = self._browser.new_context()
+        self._page = self._context.new_page()
+
+    def stop(self) -> None:
+        for attr in ("_context", "_browser"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        if self._pw is not None:
+            try:
+                self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+        self._page = None
+
+    # -- submit -------------------------------------------------------------
+
     def submit(self, vm: Voicemail) -> SubmissionResult:
         try:
             from playwright.sync_api import (  # type: ignore
                 TimeoutError as PlaywrightTimeoutError,
-                sync_playwright,
             )
         except ImportError as exc:  # pragma: no cover
             return SubmissionResult(
@@ -96,72 +143,107 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
         if not vm.received_at:
             return SubmissionResult(success=False, error="missing received_at")
 
+        # Lazily start the browser if the caller didn't use the context
+        # manager (back-compat with one-off callers).
+        owns_browser = False
+        if self._page is None:
+            self.start()
+            owns_browser = True
+        page = self._page
+
         screenshot_dir = self.cfg.resolve_path(self.cfg.ftc.screenshot_dir)
         screenshot_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = screenshot_dir / f"vm-{vm.id}.png"
 
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=self.cfg.ftc.headless)
-            context = browser.new_context()
-            page = context.new_page()
+        try:
+            page.goto(self.cfg.ftc.url, wait_until="domcontentloaded")
+
+            # The form lives behind a "Continue" landing page. Click through
+            # it whenever it appears (it appears for the FIRST submission
+            # per browser session; subsequent visits go straight to step 1).
+            try:
+                main_btn = page.locator("#MainContinueButton")
+                if main_btn.count() > 0 and main_btn.first.is_visible():
+                    log.debug("Clicking landing-page Continue button.")
+                    main_btn.first.click()
+                    page.wait_for_selector("#PhoneTextBox", timeout=20000)
+            except Exception as exc:
+                log.debug("MainContinueButton handling skipped: %s", exc)
+
+            page.wait_for_selector("#PhoneTextBox", timeout=30000)
+
+            if self._captcha_present(page):
+                return SubmissionResult(
+                    success=False,
+                    error="captcha detected on step 1",
+                    captcha_detected=True,
+                )
+
+            self._fill_step_one(page, vm)
+            page.click("#StepOneContinueButton")
+
+            page.wait_for_selector(
+                "#CallerPhoneNumberTextBox", timeout=30000
+            )
+
+            if self._captcha_present(page):
+                return SubmissionResult(
+                    success=False,
+                    error="captcha detected on step 2",
+                    captcha_detected=True,
+                )
+
+            self._fill_step_two(page, vm)
+            page.click("#StepTwoSubmitButton")
 
             try:
-                page.goto(self.cfg.ftc.url, wait_until="domcontentloaded")
-
-                if self._captcha_present(page):
-                    return SubmissionResult(
-                        success=False,
-                        error="captcha detected on step 1",
-                        captcha_detected=True,
-                    )
-
-                self._fill_step_one(page, vm)
-                page.click("#StepOneContinueButton")
-
                 page.wait_for_selector(
-                    "#CallerPhoneNumberTextBox", timeout=30000
+                    "#StepTwoAcceptedPanel", timeout=45000
                 )
-
-                if self._captcha_present(page):
-                    return SubmissionResult(
-                        success=False,
-                        error="captcha detected on step 2",
-                        captcha_detected=True,
-                    )
-
-                self._fill_step_two(page, vm)
-                page.click("#StepTwoSubmitButton")
-
-                try:
-                    page.wait_for_selector(
-                        "#StepTwoAcceptedPanel", timeout=45000
-                    )
-                except PlaywrightTimeoutError:
-                    page.screenshot(path=str(screenshot_path))
-                    return SubmissionResult(
-                        success=False,
-                        error="success panel never appeared",
-                        screenshot_path=str(screenshot_path),
-                    )
-
+            except PlaywrightTimeoutError:
                 page.screenshot(path=str(screenshot_path))
-                return SubmissionResult(
-                    success=True,
-                    screenshot_path=str(screenshot_path),
-                )
-
-            except Exception as exc:  # pragma: no cover - browser flake
+                # Detect the FTC's server-side throttle message so the worker
+                # can back off instead of burning through the queue.
+                throttled = False
                 try:
-                    page.screenshot(path=str(screenshot_path))
+                    body_text = page.locator("body").inner_text(timeout=2000)
+                    if "system difficulties" in body_text.lower() or (
+                        "unable to process your request" in body_text.lower()
+                    ):
+                        throttled = True
                 except Exception:
                     pass
                 return SubmissionResult(
                     success=False,
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=(
+                        "throttled by donotcall.gov (server returned 'system "
+                        "difficulties' page) — retry later"
+                        if throttled
+                        else "success panel never appeared"
+                    ),
                     screenshot_path=str(screenshot_path),
+                    throttled=throttled,
                 )
-            finally:
-                browser.close()
+
+            page.screenshot(path=str(screenshot_path))
+            return SubmissionResult(
+                success=True,
+                screenshot_path=str(screenshot_path),
+            )
+
+        except Exception as exc:  # pragma: no cover - browser flake
+            try:
+                page.screenshot(path=str(screenshot_path))
+            except Exception:
+                pass
+            return SubmissionResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                screenshot_path=str(screenshot_path),
+            )
+        finally:
+            if owns_browser:
+                self.stop()
 
     # -- step builders ------------------------------------------------------
 
@@ -171,13 +253,38 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
 
         page.fill("#PhoneTextBox", gv)
         page.fill("#DateOfCallTextBox", ts.strftime("%m/%d/%Y"))
+
+        # The date field is a jQuery UI datepicker that opens a popup on
+        # focus and intercepts clicks on every following field. Dismiss it
+        # explicitly without clicking anywhere (the page header contains
+        # full-width anchor links that would navigate away).
+        try:
+            page.keyboard.press("Escape")
+            page.evaluate(
+                "document.activeElement && document.activeElement.blur && document.activeElement.blur();"
+            )
+            page.evaluate(
+                "if (window.jQuery) { jQuery('#ui-datepicker-div').hide(); "
+                "jQuery.datepicker && jQuery.datepicker._hideDatepicker && "
+                "jQuery.datepicker._hideDatepicker(); }"
+            )
+            page.evaluate(
+                "var d = document.getElementById('ui-datepicker-div'); "
+                "if (d) { d.style.display = 'none'; }"
+            )
+            page.wait_for_timeout(200)
+        except Exception:
+            pass
+
         page.select_option(
             "#TimeOfCallDropDownList", _format_time_dropdown(ts.hour)
         )
         page.select_option("#ddlMinutes", _format_minutes_dropdown(ts.minute))
 
-        page.check("#PrerecordMessageYESRadioButton")
-        page.check("#PhoneCallRadioButton")
+        # Use force=True so any decorative label / radio replacement element
+        # doesn't block the input click.
+        page.check("#PrerecordMessageYESRadioButton", force=True)
+        page.check("#PhoneCallRadioButton", force=True)
 
         subject_id = vm.ftc_subject_id if vm.ftc_subject_id is not None else 0
         page.select_option("#ddlSubjectMatter", str(subject_id))
@@ -194,8 +301,8 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
             (vm.claimed_company or vm.caller_display_name or "n/a")[:120],
         )
 
-        page.check("#HaveBusinessNoRadioButton")
-        page.check("#StopCallingNoRadioButton")
+        page.check("#HaveBusinessNoRadioButton", force=True)
+        page.check("#StopCallingNoRadioButton", force=True)
 
         page.fill("#FirstNameTextBox", p.first_name)
         page.fill("#LastNameTextBox", p.last_name)
@@ -246,11 +353,13 @@ def submit_approved(
     between cycles. Used as a long-running daemon in normal operation.
     """
     init_db(cfg.resolve_path(cfg.database.path))
-    submitter = FtcPlaywrightSubmitter(cfg=cfg)
 
     successes = 0
     processed = 0
-    while True:
+    submitter = FtcPlaywrightSubmitter(cfg=cfg)
+    submitter.start()
+    try:
+      while True:
         with session_scope() as session:
             stmt = (
                 select(Voicemail)
@@ -286,6 +395,17 @@ def submit_approved(
                     vm.submit_error = "captcha detected"
                     if result.screenshot_path:
                         vm.submit_screenshot = result.screenshot_path
+                elif result.throttled:
+                    # Keep row in 'approved' so the next run picks it up
+                    # automatically when the throttle window expires.
+                    vm.submit_error = result.error
+                    vm.submit_screenshot = result.screenshot_path
+                    log.warning(
+                        "VM %s throttled. Stopping batch so we don't burn "
+                        "through the queue with more failures. Re-run later "
+                        "(or `python -m ftc_automation submit` once an hour).",
+                        vm.id,
+                    )
                 elif result.success:
                     vm.status = STATUS_SUBMITTED
                     vm.submitted_at = datetime.utcnow()
@@ -299,6 +419,16 @@ def submit_approved(
                     vm.submit_screenshot = result.screenshot_path
                     log.error("VM %s submission failed: %s", vm.id, result.error)
 
+            # If the FTC throttled us, bail out of the batch immediately.
+            if result.throttled:
+                log.info(
+                    "Throttle detected — aborting this batch. "
+                    "%d submitted, %d remaining in queue.",
+                    successes,
+                    len(row_ids) - processed - 1,
+                )
+                return successes
+
             processed += 1
             if limit and processed >= limit:
                 return successes
@@ -311,6 +441,8 @@ def submit_approved(
 
         if once:
             break
+    finally:
+        submitter.stop()
 
     return successes
 
