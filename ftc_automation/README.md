@@ -101,6 +101,7 @@ browser for the OAuth handshake and then cache the token at
 | --- | --- |
 | One-time: sweep historical backlog | `python -m ftc_automation ingest --backlog` |
 | One-time: classify the backlog | `python -m ftc_automation classify` |
+| One-time: download mp3s for spam-flagged rows so the review UI can play them inline | `python -m ftc_automation rescrape-audio` (add `--all` for every row) |
 | Recurring (cron / Task Scheduler, every 15 min): | `python -m ftc_automation ingest --gmail && python -m ftc_automation classify` |
 | Review queue in your browser | `python -m ftc_automation review` then open <http://127.0.0.1:5000/> |
 | Submit approved complaints | `python -m ftc_automation submit` (loops; `--once` to drain) |
@@ -137,9 +138,28 @@ Trigger:    After "FTC – Ingest"
 Arguments:  -m ftc_automation classify
 ```
 
-The submitter is meant to run as a long-lived daemon you start
-manually in a terminal so you can watch it (it opens a real browser by
-default until you flip `ftc.headless: true`).
+For the submitter, the easiest path is the pre-built installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ..\scripts\install_scheduled_task.ps1
+```
+
+That registers `FTCReportAutomation-HourlySubmit`, which runs
+`python -m ftc_automation submit --once` every 60 minutes, logging each
+run to `logs/auto_submit.log`. `donotcall.gov` aggressively throttles
+bursts; the hourly cadence lets the queue drain over a day or two with
+zero user attention. Useful management commands:
+
+```powershell
+Get-ScheduledTask -TaskName FTCReportAutomation-HourlySubmit | Get-ScheduledTaskInfo
+Start-ScheduledTask -TaskName FTCReportAutomation-HourlySubmit    # run now
+Get-Content .\logs\auto_submit.log -Tail 80 -Wait                 # tail logs
+Unregister-ScheduledTask -TaskName FTCReportAutomation-HourlySubmit -Confirm:$false
+```
+
+You can also run the submitter manually as a foreground daemon if you'd
+rather watch it in a terminal (`python -m ftc_automation submit`, loops
+forever).
 
 ---
 
