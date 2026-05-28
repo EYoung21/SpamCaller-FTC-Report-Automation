@@ -116,9 +116,10 @@ _CATEGORY_TO_SUBJECT_ID: dict[str, int] = {
     "retirement": 11,
     "crypto": 11,
 
-    # Misc
+    # Misc — never map to 15 (Political): FTC shows a dead-end page and
+    # does not accept the complaint. Use "Other" instead.
     "charity": 16,
-    "political": 15,
+    "political": 1,
     "dropped_call": 2,
     "unknown": 0,
     "other": 1,
@@ -157,6 +158,8 @@ def map_scam_category(
     if not scam_category:
         return 0, None
     key = scam_category.strip().lower()
+    if key == "political":
+        return 1, "Unwanted telemarketing robocall"
     if key in _CATEGORY_TO_SUBJECT_ID:
         subject_id = _CATEGORY_TO_SUBJECT_ID[key]
         return subject_id, None

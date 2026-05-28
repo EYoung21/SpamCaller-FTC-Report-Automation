@@ -51,6 +51,12 @@ def main() -> int:
             .scalar()
         )
         print(f"  Already submitted to FTC                    : {submitted}")
+        deduped = (
+            s.query(func.count(Voicemail.id))
+            .filter(Voicemail.status == "deduplicated")
+            .scalar()
+        )
+        print(f"  Deduplicated (same caller already reported)   : {deduped}")
         print()
         print("=== Audio coverage of the ready-to-triage queue ===")
         with_audio = (

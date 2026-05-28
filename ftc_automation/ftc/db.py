@@ -45,6 +45,7 @@ STATUS_REJECTED = "rejected"          # human said "not actually spam"
 STATUS_SKIPPED = "skipped"            # human deferred for later
 STATUS_SUBMITTED = "submitted"        # successfully filed with FTC
 STATUS_SUBMIT_FAILED = "submit_failed"
+STATUS_DEDUPLICATED = "deduplicated"  # skipped — same caller already reported
 
 ALL_STATUSES = {
     STATUS_NEW,
@@ -54,6 +55,7 @@ ALL_STATUSES = {
     STATUS_SKIPPED,
     STATUS_SUBMITTED,
     STATUS_SUBMIT_FAILED,
+    STATUS_DEDUPLICATED,
 }
 
 SOURCE_PLAYWRIGHT = "playwright"

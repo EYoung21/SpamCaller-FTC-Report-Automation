@@ -78,7 +78,9 @@ def _cmd_review(cfg: AppConfig, args: argparse.Namespace) -> int:
 def _cmd_submit(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .ftc.submit.ftc_playwright import submit_approved
 
-    submit_approved(cfg, once=args.once, limit=args.limit)
+    count = submit_approved(cfg, once=args.once, limit=args.limit)
+    if count < 0:
+        return 1
     return 0
 
 

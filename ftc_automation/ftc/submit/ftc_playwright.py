@@ -31,8 +31,10 @@ Success page
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +46,7 @@ from sqlalchemy import select
 from ..config import AppConfig, load_config
 from ..db import (
     STATUS_APPROVED,
+    STATUS_DEDUPLICATED,
     STATUS_SUBMITTED,
     STATUS_SUBMIT_FAILED,
     Voicemail,
@@ -84,11 +87,48 @@ class ProxyRotator:
         *,
         mode: str,
         state_path: Path,
+        bad_path: Optional[Path] = None,
+        bad_cooldown_sec: float = 1800.0,
     ) -> None:
         self.proxies = proxies
         self.mode = mode
         self.state_path = state_path
+        self.bad_path = bad_path or state_path.parent / "bad_proxies.json"
+        self.bad_cooldown_sec = bad_cooldown_sec
         self._index = self._load_index()
+        self._bad_until: dict[str, float] = self._load_bad()
+
+    def _load_bad(self) -> dict[str, float]:
+        try:
+            import json
+
+            raw = json.loads(self.bad_path.read_text(encoding="utf-8"))
+            return {k: float(v) for k, v in raw.items()}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _save_bad(self) -> None:
+        import json
+
+        self.bad_path.parent.mkdir(parents=True, exist_ok=True)
+        self.bad_path.write_text(
+            json.dumps(self._bad_until, indent=0),
+            encoding="utf-8",
+        )
+
+    def _is_bad(self, url: str) -> bool:
+        return self._bad_until.get(url, 0) > time.time()
+
+    def mark_current_bad(self) -> None:
+        if not self.proxies:
+            return
+        url = self.proxies[self._index % len(self.proxies)]
+        self._bad_until[url] = time.time() + self.bad_cooldown_sec
+        self._save_bad()
+        log.warning("Proxy marked bad for %.0fs: %s", self.bad_cooldown_sec, url)
+
+    def active_count(self) -> int:
+        return sum(1 for p in self.proxies if not self._is_bad(p))
 
     def _load_index(self) -> int:
         if not self.proxies:
@@ -122,18 +162,29 @@ class ProxyRotator:
     def advance(self) -> Optional[dict]:
         if not self.proxies:
             return None
-        self._index = (self._index + 1) % len(self.proxies)
+        n = len(self.proxies)
+        for _ in range(n):
+            self._index = (self._index + 1) % n
+            url = self.proxies[self._index]
+            if self._is_bad(url):
+                continue
+            self._save_index()
+            log.info(
+                "Rotated to proxy %d/%d (%s).",
+                self._index + 1,
+                n,
+                self.current_label(),
+            )
+            return self.current_playwright_proxy()
+        log.error("All %d proxies are in cooldown.", n)
         self._save_index()
-        log.info(
-            "Rotated to proxy %d/%d (%s).",
-            self._index + 1,
-            len(self.proxies),
-            self.current_label(),
-        )
         return self.current_playwright_proxy()
 
     def advance_for_run_start(self) -> Optional[dict]:
         if self.mode == "each_run" and len(self.proxies) > 1:
+            return self.advance()
+        # Skip a proxy that is still in cooldown from a prior run.
+        if self.proxies and self._is_bad(self.proxies[self._index % len(self.proxies)]):
             return self.advance()
         return self.current_playwright_proxy()
 
@@ -180,6 +231,27 @@ def _human_fill(page, selector: str, value: str) -> None:
     _human_pause(page, 100, 250)
 
 
+def _reliable_fill(page, selector: str, value: str) -> None:
+    """Fill short required fields and verify — ``type()`` often drops digits on slow proxies."""
+    loc = page.locator(selector)
+    loc.click(timeout=5000)
+    _human_pause(page, 60, 140)
+    loc.fill(value, timeout=15000)
+    try:
+        actual = loc.input_value(timeout=3000)
+    except Exception:
+        actual = ""
+    if actual.strip() != value.strip():
+        log.warning(
+            "%s value %r missing after fill (got %r) — retrying.",
+            selector,
+            value,
+            actual,
+        )
+        loc.fill(value, timeout=15000)
+    _human_pause(page, 80, 180)
+
+
 def _human_select(page, selector: str, value: str) -> None:
     page.locator(selector).click(timeout=5000)
     _human_pause(page, 80, 180)
@@ -192,6 +264,23 @@ def _human_check(page, selector: str) -> None:
     _human_pause(page, 120, 280)
 
 
+def _is_political_survey_rejection(page) -> bool:
+    """FTC shows an informational dead-end when subject = Political (15)."""
+    if page.locator("#StepTwoAcceptedMobileText").count() > 0:
+        return True
+    try:
+        body_text = page.locator("body").inner_text(timeout=2000).lower()
+    except Exception:
+        body_text = ""
+    return (
+        "don't cover calls political or survey" in body_text
+        or (
+            "political or survey call" in body_text
+            and "fcc" in body_text
+        )
+    )
+
+
 def _classify_post_submit(page) -> tuple[bool, bool, str]:
     """Return ``(success, throttled, detail)`` from the current page."""
     url = page.url
@@ -199,6 +288,9 @@ def _classify_post_submit(page) -> tuple[bool, bool, str]:
         body_text = page.locator("body").inner_text(timeout=3000).lower()
     except Exception:
         body_text = ""
+
+    if _is_political_survey_rejection(page):
+        return False, False, "FTC rejected political/survey category (not filed)"
 
     if page.locator("#StepTwoAcceptedPanel").count() > 0:
         return True, False, "accepted panel visible"
@@ -209,6 +301,9 @@ def _classify_post_submit(page) -> tuple[bool, bool, str]:
 
     if "error.html" in url.lower():
         return False, True, f"redirected to {url}"
+
+    if _page_is_broken(page):
+        return False, False, f"browser error page ({url})"
 
     blocked_phrases = (
         "system difficulties",
@@ -232,14 +327,28 @@ def _is_proxy_network_error(error: Optional[str]) -> bool:
             "err_proxy",
             "err_tunnel",
             "err_connection",
+            "err_name_not_resolved",
             "net::err_",
+            "chrome-error://",
             "econnrefused",
             "econnreset",
             "timed out",
             "timeouterror",
             "timeout 30000ms exceeded",
+            "target closed",
+            "target page, context or browser has been closed",
+            "this site can't be reached",
+            "took too long to respond",
         )
     )
+
+
+def _page_is_broken(page) -> bool:
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        return True
+    return url.startswith("chrome-error://") or url.startswith("about:blank")
 
 
 def _format_minutes_dropdown(minute: int) -> str:
@@ -278,7 +387,13 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
     def start(self, *, proxy: Optional[dict] = None) -> None:
         """Launch a single browser to be reused across submissions."""
         if self._browser is not None and self._page is not None:
-            return
+            try:
+                _ = self._page.url
+                return
+            except Exception:
+                log.warning("Browser session dead — relaunching.")
+                self.stop()
+
         try:
             from playwright.sync_api import sync_playwright  # type: ignore
         except ImportError as exc:  # pragma: no cover
@@ -328,6 +443,11 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
         self._page = self._context.new_page()
         self._on_success_page = False
 
+    def _recycle_browser(self, proxy: Optional[dict] = None) -> None:
+        """Fully quit Chrome and relaunch — guarantees a single window."""
+        self.stop()
+        self.start(proxy=proxy)
+
     def _reset_session(self, *, proxy: Optional[dict] = None) -> None:
         """Fresh browser context — use after throttle/errors or first launch."""
         if self._browser is None:
@@ -349,7 +469,9 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
                 return
             self._on_success_page = False
 
-        page.goto(self.cfg.ftc.url, wait_until="domcontentloaded")
+        page.goto(self.cfg.ftc.url, wait_until="domcontentloaded", timeout=25000)
+        if _page_is_broken(page):
+            raise RuntimeError(f"browser landed on broken page: {page.url}")
 
         # The form lives behind a "Continue" landing page. Click through
         # it whenever it appears (it appears for the FIRST submission
@@ -366,24 +488,19 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
         page.wait_for_selector("#PhoneTextBox", timeout=30000)
 
     def restart_with_next_proxy(self) -> None:
-        """Close the browser context and relaunch through the next proxy."""
+        """Quit Chrome and relaunch through the next proxy."""
         proxy = None
         if self._proxy_rotator is not None:
+            self._proxy_rotator.mark_current_bad()
             proxy = self._proxy_rotator.advance_on_throttle()
-        if self._browser is None:
-            self.start(proxy=proxy)
-            return
-        self._open_context(proxy)
+        self._recycle_browser(proxy)
 
     def rotate_after_successful_submit(self) -> None:
         """Switch proxy between submissions when ``proxy_rotate=each_submit``."""
         if self._proxy_rotator is None:
             return
         proxy = self._proxy_rotator.advance_after_submit()
-        if self._browser is None:
-            self.start(proxy=proxy)
-        else:
-            self._open_context(proxy)
+        self._recycle_browser(proxy)
 
     def stop(self) -> None:
         for attr in ("_context", "_browser"):
@@ -443,6 +560,9 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
 
             self._fill_step_one(page, vm)
             _human_pause(page, 300, 700)
+            if not _digits(page.locator("#PhoneTextBox").input_value(timeout=3000)):
+                log.warning("PhoneTextBox still empty — refilling GV number.")
+                _reliable_fill(page, "#PhoneTextBox", _digits(self.cfg.gv_number))
             page.locator("#StepOneContinueButton").click()
             _human_pause(page, 400, 900)
 
@@ -467,7 +587,8 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
                 page.wait_for_function(
                     """() => {
                         if (document.querySelector('#StepTwoAcceptedPanel')) return true;
-                        if (document.querySelector('#SubmitOtherComplaint_B')) return true;
+                        if (document.querySelector('#SubmitOtherComplaint_B')
+                            && !document.querySelector('#StepTwoAcceptedMobileText')) return true;
                         const u = location.href.toLowerCase();
                         if (u.includes('error.html')) return true;
                         const t = (document.body && document.body.innerText || '').toLowerCase();
@@ -482,6 +603,54 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
             page.wait_for_timeout(1500)
             page.screenshot(path=str(screenshot_path))
             ok, throttled, detail = _classify_post_submit(page)
+
+            # Political (15) lands on an FTC info page, not a real filing.
+            if not ok and _is_political_survey_rejection(page):
+                log.info(
+                    "VM %s hit political/survey dead-end — retrying as 'Other'.",
+                    vm.id,
+                )
+                btn = page.locator("#SubmitOtherComplaint_B")
+                if btn.count() > 0 and btn.first.is_visible():
+                    btn.first.click()
+                    page.wait_for_selector("#PhoneTextBox", timeout=30000)
+                else:
+                    self._navigate_to_step_one(page)
+                self._fill_step_one(
+                    page,
+                    vm,
+                    subject_id=1,
+                    subject_text=(
+                        vm.ftc_subject_text or "Unwanted telemarketing robocall"
+                    ),
+                )
+                _human_pause(page, 300, 700)
+                page.locator("#StepOneContinueButton").click()
+                _human_pause(page, 400, 900)
+                page.wait_for_selector("#CallerPhoneNumberTextBox", timeout=30000)
+                self._fill_step_two(page, vm)
+                _human_pause(page, 400, 900)
+                page.locator("#StepTwoSubmitButton").click()
+                try:
+                    page.wait_for_function(
+                        """() => {
+                            if (document.querySelector('#StepTwoAcceptedPanel')) return true;
+                            if (document.querySelector('#SubmitOtherComplaint_B')
+                                && !document.querySelector('#StepTwoAcceptedMobileText')) return true;
+                            const u = location.href.toLowerCase();
+                            if (u.includes('error.html')) return true;
+                            const t = (document.body && document.body.innerText || '').toLowerCase();
+                            return t.includes('system difficulties')
+                                || t.includes('was not processed');
+                        }""",
+                        timeout=45000,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                page.wait_for_timeout(1500)
+                page.screenshot(path=str(screenshot_path))
+                ok, throttled, detail = _classify_post_submit(page)
+
             if ok:
                 self._on_success_page = True
                 return SubmissionResult(
@@ -505,6 +674,11 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
 
         except Exception as exc:  # pragma: no cover - browser flake
             self._on_success_page = False
+            if _is_proxy_network_error(str(exc)):
+                try:
+                    self.stop()
+                except Exception:
+                    pass
             try:
                 page.screenshot(path=str(screenshot_path))
             except Exception:
@@ -520,12 +694,19 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
 
     # -- step builders ------------------------------------------------------
 
-    def _fill_step_one(self, page, vm: Voicemail) -> None:
+    def _fill_step_one(
+        self,
+        page,
+        vm: Voicemail,
+        *,
+        subject_id: Optional[int] = None,
+        subject_text: Optional[str] = None,
+    ) -> None:
         gv = _digits(self.cfg.gv_number)
         ts: datetime = vm.received_at  # type: ignore[assignment]
 
-        _human_fill(page, "#PhoneTextBox", gv)
-        _human_fill(page, "#DateOfCallTextBox", ts.strftime("%m/%d/%Y"))
+        _reliable_fill(page, "#PhoneTextBox", gv)
+        _reliable_fill(page, "#DateOfCallTextBox", ts.strftime("%m/%d/%Y"))
 
         # The date field is a jQuery UI datepicker that opens a popup on
         # focus and intercepts clicks on every following field. Dismiss it
@@ -557,16 +738,27 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
         _human_check(page, "#PrerecordMessageYESRadioButton")
         _human_check(page, "#PhoneCallRadioButton")
 
-        subject_id = vm.ftc_subject_id if vm.ftc_subject_id is not None else 0
-        _human_select(page, "#ddlSubjectMatter", str(subject_id))
-        if subject_id == 1 and vm.ftc_subject_text:
-            _human_fill(page, "#txtSubjectMatter", vm.ftc_subject_text[:120])
+        sid = subject_id if subject_id is not None else (
+            vm.ftc_subject_id if vm.ftc_subject_id is not None else 0
+        )
+        # FTC category 15 (Political) dead-ends without filing — use Other.
+        if sid == 15:
+            sid = 1
+        stext = subject_text
+        if stext is None:
+            stext = vm.ftc_subject_text
+        if sid == 1 and not stext:
+            stext = "Unwanted telemarketing robocall"
+
+        _human_select(page, "#ddlSubjectMatter", str(sid))
+        if sid == 1 and stext:
+            _human_fill(page, "#txtSubjectMatter", stext[:120])
 
     def _fill_step_two(self, page, vm: Voicemail) -> None:
         p = self.cfg.personal
         caller = _digits(vm.caller_number) or vm.caller_number or ""
 
-        _human_fill(page, "#CallerPhoneNumberTextBox", caller)
+        _reliable_fill(page, "#CallerPhoneNumberTextBox", caller)
         _human_fill(
             page,
             "#CallerNameTextBox",
@@ -613,6 +805,107 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
 # Queue worker
 # ---------------------------------------------------------------------------
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+@contextmanager
+def _submit_lock(cfg: AppConfig):
+    """Ensure only one submitter process runs at a time (one browser window)."""
+    lock_path = cfg.resolve_path("logs/submit.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = False
+    try:
+        if lock_path.exists():
+            try:
+                other_pid = int(lock_path.read_text(encoding="utf-8").strip())
+            except ValueError:
+                other_pid = 0
+            if _pid_alive(other_pid):
+                log.error(
+                    "Another submitter is already running (pid %s). "
+                    "Only one browser session should file at a time — exiting.",
+                    other_pid,
+                )
+                yield False
+                return
+            log.warning("Removing stale submit lock (pid %s is gone).", other_pid)
+            lock_path.unlink(missing_ok=True)
+
+        lock_path.write_text(str(os.getpid()), encoding="utf-8")
+        acquired = True
+        yield True
+    finally:
+        if acquired:
+            try:
+                if lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                    lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _load_reported_caller_ids(session) -> dict[str, int]:
+    """Map normalized caller digits to the first submitted voicemail id."""
+    rows = session.execute(
+        select(Voicemail).where(Voicemail.status == STATUS_SUBMITTED)
+    ).scalars()
+    reported: dict[str, int] = {}
+    for vm in rows:
+        digits = _digits(vm.caller_number)
+        if digits and digits not in reported:
+            reported[digits] = vm.id
+    return reported
+
+
+def _skip_duplicate_caller(
+    vm: Voicemail,
+    *,
+    reported_callers: dict[str, int],
+    submitted_this_run: dict[str, int],
+) -> bool:
+    """Mark *vm* deduplicated when its caller was already reported."""
+    caller_digits = _digits(vm.caller_number)
+    if not caller_digits:
+        return False
+
+    prior_id = reported_callers.get(caller_digits) or submitted_this_run.get(
+        caller_digits
+    )
+    if prior_id is None:
+        return False
+
+    vm.status = STATUS_DEDUPLICATED
+    vm.submit_error = (
+        f"duplicate caller {vm.caller_number or caller_digits}; "
+        f"already reported as VM {prior_id}"
+    )
+    log.info(
+        "Skipping VM %s — duplicate caller %s (same as VM %s).",
+        vm.id,
+        vm.caller_number or caller_digits,
+        prior_id,
+    )
+    return True
+
+
+def _record_submitted_caller(
+    vm: Voicemail,
+    *,
+    reported_callers: dict[str, int],
+    submitted_this_run: dict[str, int],
+) -> None:
+    caller_digits = _digits(vm.caller_number)
+    if caller_digits:
+        submitted_this_run[caller_digits] = vm.id
+        reported_callers[caller_digits] = vm.id
+
+
 def submit_approved(
     cfg: AppConfig,
     *,
@@ -624,6 +917,19 @@ def submit_approved(
     ``once=True`` exits after one pass; otherwise loops forever, sleeping
     between cycles. Used as a long-running daemon in normal operation.
     """
+    with _submit_lock(cfg) as acquired:
+        if not acquired:
+            return -1
+        return _submit_approved_locked(cfg, limit=limit, once=once)
+
+
+def _submit_approved_locked(
+    cfg: AppConfig,
+    *,
+    limit: Optional[int] = None,
+    once: bool = False,
+) -> int:
+    """Body of :func:`submit_approved` — caller must hold the submit lock."""
     init_db(cfg.resolve_path(cfg.database.path))
 
     successes = 0
@@ -633,6 +939,7 @@ def submit_approved(
     try:
       while True:
         with session_scope() as session:
+            reported_callers = _load_reported_caller_ids(session)
             stmt = (
                 select(Voicemail)
                 .where(Voicemail.status == STATUS_APPROVED)
@@ -649,10 +956,21 @@ def submit_approved(
             time.sleep(60)
             continue
 
+        submitted_this_run: dict[str, int] = {}
+        consecutive_net_errors = 0
+
         for vm_id in row_ids:
             with session_scope() as session:
                 vm = session.get(Voicemail, vm_id)
                 if vm is None or vm.status != STATUS_APPROVED:
+                    continue
+
+                if _skip_duplicate_caller(
+                    vm,
+                    reported_callers=reported_callers,
+                    submitted_this_run=submitted_this_run,
+                ):
+                    processed += 1
                     continue
 
                 log.info("Submitting VM %s (%s)...", vm.id, vm.caller_number)
@@ -696,6 +1014,11 @@ def submit_approved(
                             vm.submit_error = None
                             vm.submit_screenshot = retry.screenshot_path
                             successes += 1
+                            _record_submitted_caller(
+                                vm,
+                                reported_callers=reported_callers,
+                                submitted_this_run=submitted_this_run,
+                            )
                             log.info(
                                 "VM %s submitted successfully after proxy rotate.",
                                 vm.id,
@@ -720,11 +1043,17 @@ def submit_approved(
                             processed += 1
                             continue
                 elif result.success:
+                    consecutive_net_errors = 0
                     vm.status = STATUS_SUBMITTED
                     vm.submitted_at = datetime.utcnow()
                     vm.submit_error = None
                     vm.submit_screenshot = result.screenshot_path
                     successes += 1
+                    _record_submitted_caller(
+                        vm,
+                        reported_callers=reported_callers,
+                        submitted_this_run=submitted_this_run,
+                    )
                     log.info("VM %s submitted successfully.", vm.id)
                     if submitter._proxy_rotator and submitter._proxy_rotator.mode == "each_submit":
                         submitter.rotate_after_successful_submit()
@@ -742,11 +1071,17 @@ def submit_approved(
                         submitter.restart_with_next_proxy()
                         retry = submitter.submit(vm)
                         if retry.success:
+                            consecutive_net_errors = 0
                             vm.status = STATUS_SUBMITTED
                             vm.submitted_at = datetime.utcnow()
                             vm.submit_error = None
                             vm.submit_screenshot = retry.screenshot_path
                             successes += 1
+                            _record_submitted_caller(
+                                vm,
+                                reported_callers=reported_callers,
+                                submitted_this_run=submitted_this_run,
+                            )
                             log.info(
                                 "VM %s submitted successfully after proxy rotate.",
                                 vm.id,
@@ -762,14 +1097,22 @@ def submit_approved(
                         elif _is_proxy_network_error(retry.error):
                             vm.submit_error = retry.error
                             vm.submit_screenshot = retry.screenshot_path
+                            consecutive_net_errors += 1
                             log.warning(
                                 "VM %s still unreachable after proxy rotate; "
                                 "leaving approved for next run.",
                                 vm.id,
                             )
                             processed += 1
+                            if consecutive_net_errors >= 3:
+                                log.error(
+                                    "Three consecutive network failures — "
+                                    "stopping batch to avoid chrome-error loops."
+                                )
+                                return successes
                             continue
                         else:
+                            consecutive_net_errors += 1
                             vm.status = STATUS_SUBMIT_FAILED
                             vm.submit_error = retry.error
                             vm.submit_screenshot = retry.screenshot_path
@@ -780,6 +1123,22 @@ def submit_approved(
                             )
                             processed += 1
                             continue
+                    if _is_proxy_network_error(result.error):
+                        consecutive_net_errors += 1
+                        vm.submit_error = result.error
+                        vm.submit_screenshot = result.screenshot_path
+                        log.warning(
+                            "VM %s network error with no proxy retry path; "
+                            "leaving approved.",
+                            vm.id,
+                        )
+                        processed += 1
+                        if consecutive_net_errors >= 3:
+                            log.error(
+                                "Three consecutive network failures — stopping batch."
+                            )
+                            return successes
+                        continue
                     vm.status = STATUS_SUBMIT_FAILED
                     vm.submit_error = result.error
                     vm.submit_screenshot = result.screenshot_path

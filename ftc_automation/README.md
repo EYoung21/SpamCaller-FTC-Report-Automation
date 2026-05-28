@@ -161,6 +161,11 @@ You can also run the submitter manually as a foreground daemon if you'd
 rather watch it in a terminal (`python -m ftc_automation submit`, loops
 forever).
 
+**Caller deduplication:** the submitter files **one FTC report per unique
+caller number**. If the same spammer left multiple voicemails, only the
+oldest approved row is submitted; later rows are marked `deduplicated`
+with a pointer to the VM that was actually filed.
+
 ---
 
 ## How the FTC form is filled in
