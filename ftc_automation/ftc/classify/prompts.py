@@ -70,8 +70,8 @@ FEW_SHOT_EXAMPLES = [
     },
     {
         "transcript": (
-            "Hey, just calling, just calling to see if you're free for dinner "
-            "Sunday. Call me back when you get a chance, love you."
+            "Hey, just calling to see if you're free for dinner "
+            "Sunday. Call me back when you get a chance."
         ),
         "caller_number": "+18585551212",
         "expected": {
@@ -80,7 +80,7 @@ FEW_SHOT_EXAMPLES = [
             "callback_number": None,
             "claimed_company": None,
             "scam_category": "unknown",
-            "summary": "Personal message from a someone known to the recipient.",
+            "summary": "Personal message from someone known to the recipient.",
             "ftc_comment": "",
             "should_report": False,
         },

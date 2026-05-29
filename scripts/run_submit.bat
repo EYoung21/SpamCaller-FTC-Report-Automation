@@ -12,7 +12,9 @@ REM timestamp banner so you can scroll back through history.
 
 setlocal
 
-set REPO=C:\Users\hello\Documents\FTCReportAutomation
+REM Repo root = parent of scripts\ (edit if you move the install elsewhere).
+set "REPO=%~dp0.."
+set "REPO=%REPO:~0,-1%"
 set PY=%REPO%\.venv\Scripts\python.exe
 set LOGDIR=%REPO%\logs
 set LOGFILE=%LOGDIR%\auto_submit.log

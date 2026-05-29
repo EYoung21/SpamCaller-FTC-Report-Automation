@@ -21,7 +21,7 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = "FTCReportAutomation-HourlySubmit",
-    [string]$RepoRoot = "C:\Users\hello\Documents\FTCReportAutomation",
+    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
     [int]$IntervalMinutes = 30
 )
 

@@ -15,16 +15,16 @@ rate-limits us.
 
 ## Why this exists
 
-Many households was getting five-to-fifteen unwanted calls a day. Auto warranty scams,
+Many households get five-to-fifteen unwanted robocalls a day. Auto warranty scams,
 fake debt-consolidation pitches, "your Amazon order has been charged,"
-Medicare bait, the works. We tried a handful of third-party call-blocking
-and screening apps. The results were uniformly bad:
+Medicare bait, the works. Third-party call-blocking and screening apps often
+fall short:
 
-- Some couldn't filter spam on her carrier at all.
-- Others started misfiring on legitimate calls — her doctor's office,
-  pharmacy refill line, school robocalls — so we had to turn them off.
-- A couple seemed to make things *worse* over time, as if her number was
-  being shared with the very ecosystem they claimed to protect her from.
+- Some can't filter spam on certain carriers at all.
+- Others misfire on legitimate calls — doctor's offices,
+  pharmacy refill lines, school announcements — so people turn them off.
+- A few seem to make things *worse* over time, as if the number was
+  being shared with the very ecosystem they claimed to protect against.
 
 Reading the FCC and FTC's own consumer guidance, the actual recommended
 action is to **report each unwanted call to the National Do Not Call Registry
@@ -141,22 +141,21 @@ creation, configuration reference, FTC form-field mapping table) are in
 
 ---
 
-## Real-world numbers from one inbox
+## Example throughput (single inbox)
 
-This is what the pipeline did on the account holder's Google Voice account:
+On one real Google Voice account used during development:
 
-| Metric                                           | Value     |
+| Metric                                           | Example   |
 | ------------------------------------------------ | --------- |
-| Voicemails ingested (Mar 2021 – May 2026)        | ~3,000     |
-| Classified by `gpt-4o-mini`                      | ~2,750     |
-| Flagged as spam (≥ 0.65 confidence)              | 259       |
-| Approved after human review                      | 222       |
-| OpenAI cost to classify the full backlog         | ~$2.10    |
+| Voicemails ingested (multi-year backlog)         | ~3,000    |
+| Classified by `gpt-4o-mini`                      | ~2,750    |
+| Flagged as spam (≥ 0.65 confidence)              | ~250      |
+| Approved after human review                      | ~220      |
+| OpenAI cost to classify the full backlog         | ~$2       |
 | Wall-clock time to classify                      | ~30 min   |
-| Audio coverage of flagged spam                   | 68 %      |
 | Hands-on time per voicemail in the review UI     | ~3 sec    |
 
-The hourly auto-submitter then files those approved complaints unattended over
+The hourly auto-submitter then files approved complaints unattended over
 the next day or two, sleeping politely between donotcall.gov throttle windows.
 
 ---
@@ -214,7 +213,7 @@ SpamCaller-FTC-Report-Automation/
 
 ## Disclaimers and scope
 
-- **Personal use.** This is a tool I built for my family. It is not affiliated
+- **Personal use.** This is a consumer automation tool. It is not affiliated
   with the FTC, FCC, Google, or any third party. It does not promise to stop
   any specific call from happening. Reporting numbers to the Do Not Call
   Registry is what the FTC asks consumers to do; this just automates the

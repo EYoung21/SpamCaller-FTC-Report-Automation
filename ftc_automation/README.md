@@ -129,7 +129,7 @@ Trigger:    Every 15 minutes
 Action:     Start a program
 Program:    C:\path\to\.venv\Scripts\python.exe
 Arguments:  -m ftc_automation ingest --gmail
-Start in:   C:\Users\hello\Documents\FTCReportAutomation
+Start in:   C:\path\to\FTCReportAutomation
 ```
 
 ```
@@ -242,7 +242,7 @@ python scripts/fetch_proxies.py --test 80 --country ALL --socks5
 
 Working endpoints land in `secrets/proxies.txt` and load automatically via
 `ftc.proxy_file`. **Do not file real complaints through untrusted free
-proxies** — they can read your mom's name/address on the form. Hotspot or
+proxies** — they can read complainant name/address on the form. Hotspot or
 paid residential is safer.
 
 **There is no magic IP spoof without a network path.** Options ranked:
