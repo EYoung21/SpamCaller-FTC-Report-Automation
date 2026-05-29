@@ -6,6 +6,7 @@ Run as a module from the project root:
     python -m ftc_automation ingest --backlog
     python -m ftc_automation ingest --gmail
     python -m ftc_automation classify [--limit N] [--reclassify]
+    python -m ftc_automation approve [--min-confidence 0] [--retry-failed]
     python -m ftc_automation review
     python -m ftc_automation submit [--once] [--limit N]
     python -m ftc_automation status
@@ -61,6 +62,19 @@ def _cmd_classify(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .ftc.classify.openai_classifier import classify_pending
 
     classify_pending(cfg, limit=args.limit, reclassify=args.reclassify)
+    return 0
+
+
+def _cmd_approve(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .ftc.review.approve import approve_pending
+
+    count = approve_pending(
+        cfg,
+        min_confidence=args.min_confidence,
+        retry_failed=args.retry_failed,
+        limit=args.limit,
+    )
+    log.info("Approved %d voicemail(s) for FTC submission.", count)
     return 0
 
 
@@ -134,6 +148,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cls.add_argument("--limit", type=int, default=None)
     p_cls.add_argument("--reclassify", action="store_true", help="Also re-run on already-classified rows")
 
+    p_apr = sub.add_parser(
+        "approve",
+        help="Bulk-approve classified spam voicemails for FTC submission",
+    )
+    p_apr.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.0,
+        help="Only approve rows at or above this confidence (default: 0 = all spam)",
+    )
+    p_apr.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Also re-queue submit_failed rows that have a caller number",
+    )
+    p_apr.add_argument("--limit", type=int, default=None)
+
     p_rev = sub.add_parser("review", help="Launch Flask review UI")
     p_rev.add_argument("--host", default=None)
     p_rev.add_argument("--port", type=int, default=None)
@@ -162,6 +193,7 @@ _DISPATCH = {
     "login": _cmd_login,
     "ingest": _cmd_ingest,
     "classify": _cmd_classify,
+    "approve": _cmd_approve,
     "review": _cmd_review,
     "submit": _cmd_submit,
     "rescrape-audio": _cmd_rescrape_audio,
