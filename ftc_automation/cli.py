@@ -45,7 +45,7 @@ def _cmd_ingest(cfg: AppConfig, args: argparse.Namespace) -> int:
     if args.backlog:
         from .ftc.ingest.gv_playwright import scrape_backlog
 
-        scrape_backlog(cfg, limit=args.limit)
+        scrape_backlog(cfg, limit=args.limit, since_days=args.since_days)
         did_anything = True
     if args.gmail:
         from .ftc.ingest.gmail_watcher import ingest_gmail
@@ -142,6 +142,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Cap how many threads/emails to ingest this run (good for smoke tests).",
+    )
+    p_ing.add_argument(
+        "--since-days",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Only ingest voicemails from the last N days (GV backlog scrape).",
     )
 
     p_cls = sub.add_parser("classify", help="Run OpenAI classifier over pending voicemails")

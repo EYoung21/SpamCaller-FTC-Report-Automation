@@ -440,11 +440,6 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
         self._open_context(proxy)
 
     def _open_context(self, proxy: Optional[dict]) -> None:
-        if self._context is not None:
-            try:
-                self._context.close()
-            except Exception:
-                pass
         kwargs: dict = {
             "viewport": {"width": 1366, "height": 900},
             "locale": "en-US",
@@ -455,12 +450,19 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
             log.info("Playwright using proxy %s", proxy.get("server"))
         else:
             log.info("Playwright using direct connection (no proxy).")
+
+        old_context = self._context
         self._context = self._browser.new_context(**kwargs)
         self._context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
         self._page = self._context.new_page()
         self._on_success_page = False
+        if old_context is not None:
+            try:
+                old_context.close()
+            except Exception:
+                pass
 
     def _recycle_browser(self, proxy: Optional[dict] = None) -> None:
         """Fully quit Chrome and relaunch — guarantees a single window."""
@@ -506,20 +508,30 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
 
         page.wait_for_selector("#PhoneTextBox", timeout=30000)
 
-    def restart_with_next_proxy(self) -> None:
-        """Quit Chrome and relaunch through the next proxy."""
-        proxy = None
-        if self._proxy_rotator is not None:
-            self._proxy_rotator.mark_current_bad()
-            proxy = self._proxy_rotator.advance_on_throttle()
-        self._recycle_browser(proxy)
+    def restart_with_next_proxy(self) -> bool:
+        """Switch to the next proxy (new context, same Chrome process).
+
+        Returns False when every proxy is in cooldown.
+        """
+        if self._proxy_rotator is None:
+            return False
+        self._proxy_rotator.mark_current_bad()
+        if self._proxy_rotator.active_count() == 0:
+            log.error("All proxies are in cooldown — stopping rotation.")
+            return False
+        proxy = self._proxy_rotator.advance()
+        if self._browser is None:
+            self.start(proxy=proxy)
+        else:
+            self._reset_session(proxy=proxy)
+        return True
 
     def rotate_after_successful_submit(self) -> None:
         """Switch proxy between submissions when ``proxy_rotate=each_submit``."""
         if self._proxy_rotator is None:
             return
         proxy = self._proxy_rotator.advance_after_submit()
-        self._recycle_browser(proxy)
+        self._reset_session(proxy=proxy)
 
     def stop(self) -> None:
         for attr in ("_context", "_browser"):
@@ -693,11 +705,6 @@ class FtcPlaywrightSubmitter(FtcSubmitter):
 
         except Exception as exc:  # pragma: no cover - browser flake
             self._on_success_page = False
-            if _is_proxy_network_error(str(exc)):
-                try:
-                    self.stop()
-                except Exception:
-                    pass
             try:
                 page.screenshot(path=str(screenshot_path))
             except Exception:
@@ -925,6 +932,59 @@ def _record_submitted_caller(
         reported_callers[caller_digits] = vm.id
 
 
+def _should_retry_with_next_proxy(result: SubmissionResult) -> bool:
+    """Return True when another proxy might succeed (block/timeout, not CAPTCHA)."""
+    if result.success or result.captcha_detected:
+        return False
+    if result.throttled:
+        return True
+    return _is_proxy_network_error(result.error)
+
+
+def _submit_with_proxy_retries(
+    submitter: FtcPlaywrightSubmitter,
+    vm: Voicemail,
+) -> SubmissionResult:
+    """Try the current proxy, then rotate through the rest of the pool."""
+    rotator = submitter._proxy_rotator
+    max_attempts = len(rotator.proxies) if rotator and rotator.proxies else 1
+
+    result = submitter.submit(vm)
+    if result.success or result.captcha_detected or max_attempts <= 1:
+        return result
+    if not _should_retry_with_next_proxy(result):
+        return result
+
+    for attempt in range(2, max_attempts + 1):
+        log.info(
+            "VM %s failed (%s) — trying proxy %d/%d…",
+            vm.id,
+            result.error,
+            attempt,
+            max_attempts,
+        )
+        if not submitter.restart_with_next_proxy():
+            break
+        result = submitter.submit(vm)
+        if result.success or result.captcha_detected:
+            return result
+        if not _should_retry_with_next_proxy(result):
+            return result
+
+    if rotator and rotator.active_count() == 0:
+        log.warning(
+            "VM %s stopped — all proxies in cooldown.",
+            vm.id,
+        )
+    else:
+        log.warning(
+            "VM %s exhausted all %d proxies without success.",
+            vm.id,
+            max_attempts,
+        )
+    return result
+
+
 def submit_approved(
     cfg: AppConfig,
     *,
@@ -993,7 +1053,7 @@ def _submit_approved_locked(
                     continue
 
                 log.info("Submitting VM %s (%s)...", vm.id, vm.caller_number)
-                result = submitter.submit(vm)
+                result = _submit_with_proxy_retries(submitter, vm)
 
                 if result.captcha_detected:
                     log.warning(
@@ -1004,63 +1064,6 @@ def _submit_approved_locked(
                     vm.submit_error = "captcha detected"
                     if result.screenshot_path:
                         vm.submit_screenshot = result.screenshot_path
-                elif result.throttled:
-                    # Keep row in 'approved' so the next run picks it up
-                    # automatically when the throttle window expires.
-                    vm.submit_error = result.error
-                    vm.submit_screenshot = result.screenshot_path
-                    log.warning(
-                        "VM %s blocked (%s). Stopping batch so we don't burn "
-                        "through the queue with more failures. Re-run later "
-                        "or submit manually in a normal browser.",
-                        vm.id,
-                        result.response_url or result.error,
-                    )
-                    # If proxies are configured, rotate once and retry
-                    # immediately before giving up on this batch.
-                    if (
-                        submitter._proxy_rotator is not None
-                        and len(submitter._proxy_rotator.proxies) > 1
-                    ):
-                        log.info(
-                            "Rotating proxy and retrying VM %s once…", vm.id
-                        )
-                        submitter.restart_with_next_proxy()
-                        retry = submitter.submit(vm)
-                        if retry.success:
-                            vm.status = STATUS_SUBMITTED
-                            vm.submitted_at = datetime.utcnow()
-                            vm.submit_error = None
-                            vm.submit_screenshot = retry.screenshot_path
-                            successes += 1
-                            _record_submitted_caller(
-                                vm,
-                                reported_callers=reported_callers,
-                                submitted_this_run=submitted_this_run,
-                            )
-                            log.info(
-                                "VM %s submitted successfully after proxy rotate.",
-                                vm.id,
-                            )
-                            processed += 1
-                            if submitter._proxy_rotator.mode == "each_submit":
-                                submitter.rotate_after_successful_submit()
-                            continue
-                        if retry.throttled:
-                            vm.submit_error = retry.error
-                            vm.submit_screenshot = retry.screenshot_path
-                            result = retry
-                        elif not retry.success:
-                            vm.status = STATUS_SUBMIT_FAILED
-                            vm.submit_error = retry.error
-                            vm.submit_screenshot = retry.screenshot_path
-                            log.error(
-                                "VM %s failed after proxy rotate: %s",
-                                vm.id,
-                                retry.error,
-                            )
-                            processed += 1
-                            continue
                 elif result.success:
                     consecutive_net_errors = 0
                     vm.status = STATUS_SUBMITTED
@@ -1074,104 +1077,40 @@ def _submit_approved_locked(
                         submitted_this_run=submitted_this_run,
                     )
                     log.info("VM %s submitted successfully.", vm.id)
-                    if submitter._proxy_rotator and submitter._proxy_rotator.mode == "each_submit":
-                        submitter.rotate_after_successful_submit()
-                else:
                     if (
-                        _is_proxy_network_error(result.error)
-                        and submitter._proxy_rotator is not None
-                        and len(submitter._proxy_rotator.proxies) > 1
+                        submitter._proxy_rotator
+                        and submitter._proxy_rotator.mode == "each_submit"
                     ):
-                        log.warning(
-                            "VM %s proxy/network error (%s). Rotating and retrying once…",
-                            vm.id,
-                            result.error,
+                        submitter.rotate_after_successful_submit()
+                elif result.throttled:
+                    vm.status = STATUS_SUBMIT_FAILED
+                    vm.submit_error = result.error
+                    vm.submit_screenshot = result.screenshot_path
+                    log.error(
+                        "VM %s blocked on all proxies (%s).",
+                        vm.id,
+                        result.response_url or result.error,
+                    )
+                elif _is_proxy_network_error(result.error):
+                    vm.submit_error = result.error
+                    vm.submit_screenshot = result.screenshot_path
+                    consecutive_net_errors += 1
+                    log.warning(
+                        "VM %s unreachable on all proxies; leaving approved "
+                        "for next run.",
+                        vm.id,
+                    )
+                    if consecutive_net_errors >= 3:
+                        log.error(
+                            "Three consecutive network failures — "
+                            "stopping batch to avoid chrome-error loops."
                         )
-                        submitter.restart_with_next_proxy()
-                        retry = submitter.submit(vm)
-                        if retry.success:
-                            consecutive_net_errors = 0
-                            vm.status = STATUS_SUBMITTED
-                            vm.submitted_at = datetime.utcnow()
-                            vm.submit_error = None
-                            vm.submit_screenshot = retry.screenshot_path
-                            successes += 1
-                            _record_submitted_caller(
-                                vm,
-                                reported_callers=reported_callers,
-                                submitted_this_run=submitted_this_run,
-                            )
-                            log.info(
-                                "VM %s submitted successfully after proxy rotate.",
-                                vm.id,
-                            )
-                            processed += 1
-                            if submitter._proxy_rotator.mode == "each_submit":
-                                submitter.rotate_after_successful_submit()
-                            continue
-                        if retry.throttled:
-                            vm.submit_error = retry.error
-                            vm.submit_screenshot = retry.screenshot_path
-                            result = retry
-                        elif _is_proxy_network_error(retry.error):
-                            vm.submit_error = retry.error
-                            vm.submit_screenshot = retry.screenshot_path
-                            consecutive_net_errors += 1
-                            log.warning(
-                                "VM %s still unreachable after proxy rotate; "
-                                "leaving approved for next run.",
-                                vm.id,
-                            )
-                            processed += 1
-                            if consecutive_net_errors >= 3:
-                                log.error(
-                                    "Three consecutive network failures — "
-                                    "stopping batch to avoid chrome-error loops."
-                                )
-                                return successes
-                            continue
-                        else:
-                            consecutive_net_errors += 1
-                            vm.status = STATUS_SUBMIT_FAILED
-                            vm.submit_error = retry.error
-                            vm.submit_screenshot = retry.screenshot_path
-                            log.error(
-                                "VM %s failed after proxy rotate: %s",
-                                vm.id,
-                                retry.error,
-                            )
-                            processed += 1
-                            continue
-                    if _is_proxy_network_error(result.error):
-                        consecutive_net_errors += 1
-                        vm.submit_error = result.error
-                        vm.submit_screenshot = result.screenshot_path
-                        log.warning(
-                            "VM %s network error with no proxy retry path; "
-                            "leaving approved.",
-                            vm.id,
-                        )
-                        processed += 1
-                        if consecutive_net_errors >= 3:
-                            log.error(
-                                "Three consecutive network failures — stopping batch."
-                            )
-                            return successes
-                        continue
+                        return successes
+                else:
                     vm.status = STATUS_SUBMIT_FAILED
                     vm.submit_error = result.error
                     vm.submit_screenshot = result.screenshot_path
                     log.error("VM %s submission failed: %s", vm.id, result.error)
-
-            # If the FTC throttled us, bail out of the batch immediately.
-            if result.throttled:
-                log.info(
-                    "Throttle detected — aborting this batch. "
-                    "%d submitted, %d remaining in queue.",
-                    successes,
-                    len(row_ids) - processed - 1,
-                )
-                return successes
 
             processed += 1
             if limit and processed >= limit:

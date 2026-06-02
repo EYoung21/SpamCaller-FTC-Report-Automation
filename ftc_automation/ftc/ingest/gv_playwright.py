@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -182,6 +182,7 @@ def interactive_login(storage_state_path: Path) -> None:
             # voicemail) means sign-in succeeded.
             matched = any(
                 "voice.google.com/u/" in u
+                or ("voice.google.com" in u and "/voicemail" in u)
                 or ("voice.google.com" in u and "/messages" in u)
                 or ("voice.google.com" in u and "/calls" in u)
                 for u in urls
@@ -380,7 +381,10 @@ def _row_key(row: dict) -> str:
 
 
 def _scrape_thread_list(
-    page, *, max_threads: Optional[int] = None
+    page,
+    *,
+    max_threads: Optional[int] = None,
+    since_days: Optional[int] = None,
 ) -> tuple[list[dict], str]:
     """Scroll the (virtualised) voicemail list, deduping across scroll
     positions. Returns ``(rows, selector_used)``.
@@ -391,10 +395,20 @@ def _scrape_thread_list(
     """
     sel = _pick_thread_selector(page)
 
+    since_cutoff: Optional[datetime] = None
+    if since_days is not None and since_days > 0:
+        since_cutoff = datetime.now() - timedelta(days=since_days)
+        log.info(
+            "Limiting scrape to voicemails since %s (%d days).",
+            since_cutoff.strftime("%Y-%m-%d"),
+            since_days,
+        )
+
     collected: dict[str, dict] = {}
     stable_iters = 0
     last_size = -1
     no_new_iters = 0
+    past_cutoff_iters = 0
 
     # Try to find the actual scrollable viewport so we can scroll it
     # directly rather than relying on the last row being in view.
@@ -444,6 +458,22 @@ def _scrape_thread_list(
         else:
             no_new_iters += 1
 
+        if since_cutoff is not None and new_rows:
+            dated = [
+                _parse_timestamp(r.get("timestamp_text"))
+                for r in new_rows
+            ]
+            parsed = [d for d in dated if d is not None]
+            if parsed and all(d < since_cutoff for d in parsed):
+                past_cutoff_iters += 1
+                log.info(
+                    "Viewport rows are all older than cutoff (%d/%d past-cutoff iters).",
+                    past_cutoff_iters,
+                    3,
+                )
+            else:
+                past_cutoff_iters = 0
+
         # 2. Scroll the viewport down a page-worth.
         scrolled = False
         if viewport_handle is not None:
@@ -473,7 +503,13 @@ def _scrape_thread_list(
         page.wait_for_timeout(900)
 
         # 3. Stop when scrolling has stopped revealing new rows for several
-        #    iterations in a row.
+        #    iterations in a row, or we've scrolled past the since_days window.
+        if since_cutoff is not None and past_cutoff_iters >= 3:
+            log.info(
+                "Reached voicemails older than %d days; stopping scroll.",
+                since_days,
+            )
+            break
         if no_new_iters >= 6:
             log.info(
                 "No new threads after %d scroll iterations; stopping.",
@@ -525,10 +561,17 @@ def _resolve_caller_via_thread(page, item_locator) -> Optional[str]:
     return number
 
 
-def scrape_backlog(cfg: AppConfig, *, limit: Optional[int] = None) -> int:
+def scrape_backlog(
+    cfg: AppConfig,
+    *,
+    limit: Optional[int] = None,
+    since_days: Optional[int] = None,
+) -> int:
     """Scrape the voicemail backlog into the database. Returns # new rows.
 
     ``limit`` (if set) overrides ``cfg.google_voice.max_threads`` for this run.
+    ``since_days`` (if set) only ingests voicemails from the last N days and
+    stops scrolling once older threads dominate the viewport.
     """
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
@@ -538,44 +581,67 @@ def scrape_backlog(cfg: AppConfig, *, limit: Optional[int] = None) -> int:
         ) from exc
 
     storage_state_path = cfg.resolve_path(cfg.google_voice.storage_state_path)
-    if not storage_state_path.exists():
+    user_data_dir = storage_state_path.parent / "chrome_profile"
+    if not storage_state_path.exists() and not user_data_dir.exists():
         raise SystemExit(
-            f"No storage_state found at {storage_state_path}. Run "
+            f"No Google Voice session found. Run "
             f"`python -m ftc_automation login` first."
         )
 
     init_db(cfg.resolve_path(cfg.database.path))
     cap = limit if limit is not None else cfg.google_voice.max_threads
+    since_cutoff: Optional[datetime] = None
+    if since_days is not None and since_days > 0:
+        since_cutoff = datetime.now() - timedelta(days=since_days)
 
     chrome_exe = _resolve_chrome_executable()
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-default-browser-check",
+        "--no-first-run",
+    ]
 
     inserted = 0
+    skipped_old = 0
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            executable_path=chrome_exe,
-            channel="chrome" if not chrome_exe else None,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-default-browser-check",
-                "--no-first-run",
-            ],
-            ignore_default_args=["--enable-automation"],
-        )
-        context = browser.new_context(
-            storage_state=str(storage_state_path),
-            viewport={"width": 1280, "height": 900},
-        )
+        use_profile = user_data_dir.is_dir() and any(user_data_dir.iterdir())
+        browser = None
+        if use_profile:
+            log.info("Using Chrome profile from login (%s).", user_data_dir)
+            context = pw.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                headless=True,
+                executable_path=chrome_exe,
+                channel="chrome" if not chrome_exe else None,
+                args=launch_args,
+                ignore_default_args=["--enable-automation"],
+                viewport={"width": 1280, "height": 900},
+            )
+        else:
+            log.info("Using storage_state.json (no chrome_profile found).")
+            browser = pw.chromium.launch(
+                headless=True,
+                executable_path=chrome_exe,
+                channel="chrome" if not chrome_exe else None,
+                args=launch_args,
+                ignore_default_args=["--enable-automation"],
+            )
+            context = browser.new_context(
+                storage_state=str(storage_state_path),
+                viewport={"width": 1280, "height": 900},
+            )
         context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
-        page = context.new_page()
+        page = context.pages[0] if context.pages else context.new_page()
         page.goto(VOICE_URL, wait_until="domcontentloaded", timeout=60000)
         # Give the SPA a beat to render after DOM ready.
         page.wait_for_timeout(2500)
 
         try:
-            threads, sel_used = _scrape_thread_list(page, max_threads=cap)
+            threads, sel_used = _scrape_thread_list(
+                page, max_threads=cap, since_days=since_days
+            )
         except Exception as exc:
             log.error("Scrape failed: %s. Saving debug screenshot.", exc)
             debug_path = cfg.resolve_path("submissions") / "gv_debug.png"
@@ -586,7 +652,7 @@ def scrape_backlog(cfg: AppConfig, *, limit: Optional[int] = None) -> int:
                 log.error("Current URL: %s", page.url)
             except Exception:
                 pass
-            browser.close()
+            context.close()
             raise
 
         threads = threads[:cap]
@@ -601,6 +667,9 @@ def scrape_backlog(cfg: AppConfig, *, limit: Optional[int] = None) -> int:
             # for any contact-named row before submission.
 
             received_at = _parse_timestamp(t["timestamp_text"])
+            if since_cutoff is not None and received_at is not None and received_at < since_cutoff:
+                skipped_old += 1
+                continue
             duration = _parse_duration(t["duration_text"])
 
             # Build a stable, content-derived ID so re-running the ingest
@@ -635,9 +704,13 @@ def scrape_backlog(cfg: AppConfig, *, limit: Optional[int] = None) -> int:
                 if created:
                     inserted += 1
 
-        browser.close()
+        context.close()
 
-    log.info("Backlog ingest complete. %d new voicemail(s) added.", inserted)
+    log.info(
+        "Backlog ingest complete. %d new voicemail(s) added%s.",
+        inserted,
+        f", {skipped_old} skipped (older than {since_days} days)" if skipped_old else "",
+    )
     return inserted
 
 
