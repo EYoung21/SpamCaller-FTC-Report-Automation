@@ -88,6 +88,30 @@ class OpenAIConfig(BaseModel):
         return self.api_key.strip()
 
 
+class BedrockConfig(BaseModel):
+    """Amazon Bedrock (Nova Micro) — default voicemail spam classifier."""
+
+    region: str = "us-east-1"
+    model_id: str = "amazon.nova-micro-v1:0"
+    timeout_sec: int = 120
+
+    def resolved_region(self) -> str:
+        for key in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+            val = os.environ.get(key, "").strip()
+            if val:
+                return val
+        return self.region.strip()
+
+    def resolved_model_id(self) -> str:
+        return os.environ.get("BEDROCK_MODEL_ID", self.model_id).strip()
+
+    def resolved_timeout_sec(self) -> int:
+        raw = os.environ.get("BEDROCK_TIMEOUT", "").strip()
+        if raw.isdigit():
+            return int(raw)
+        return self.timeout_sec
+
+
 class GmailConfig(BaseModel):
     client_secret_path: str = "secrets/gmail_client_secret.json"
     token_path: str = "secrets/gmail_token.json"
@@ -143,6 +167,7 @@ class AppConfig(BaseModel):
     gv_number: str
     personal: PersonalConfig
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
+    bedrock: BedrockConfig = Field(default_factory=BedrockConfig)
     gmail: GmailConfig = Field(default_factory=GmailConfig)
     google_voice: GoogleVoiceConfig = Field(default_factory=GoogleVoiceConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)

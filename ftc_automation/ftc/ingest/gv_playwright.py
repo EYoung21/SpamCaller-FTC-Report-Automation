@@ -32,6 +32,7 @@ from dateutil import parser as dateparser
 
 from ..config import AppConfig, load_config
 from ..db import (
+    RECORD_VOICEMAIL,
     SOURCE_PLAYWRIGHT,
     STATUS_NEW,
     init_db,
@@ -281,14 +282,15 @@ def _parse_duration(raw: Optional[str]) -> Optional[int]:
     return total
 
 
-def _pick_thread_selector(page) -> str:
+def _pick_thread_selector(page, selectors: Optional[list[str]] = None) -> str:
     """Wait for and return whichever known selector actually matches."""
+    thread_selectors = selectors or THREAD_SELECTORS
     deadline = 60.0
     import time as _time
 
     start = _time.time()
     while _time.time() - start < deadline:
-        for sel in THREAD_SELECTORS:
+        for sel in thread_selectors:
             try:
                 if page.locator(sel).count() > 0:
                     log.info("Using thread selector: %s", sel)
@@ -298,8 +300,8 @@ def _pick_thread_selector(page) -> str:
         page.wait_for_timeout(1000)
     raise RuntimeError(
         "None of the known thread selectors matched. Google Voice's DOM may "
-        "have changed. Try opening voice.google.com/u/0/voicemail and use "
-        "DevTools to find the current row tag."
+        "have changed. Try opening voice.google.com and use DevTools to find "
+        "the current row tag."
     )
 
 
@@ -385,21 +387,29 @@ def _scrape_thread_list(
     *,
     max_threads: Optional[int] = None,
     since_days: Optional[int] = None,
+    thread_selectors: Optional[list[str]] = None,
+    extract_rows=None,
+    row_key_fn=None,
+    list_label: str = "voicemail",
 ) -> tuple[list[dict], str]:
-    """Scroll the (virtualised) voicemail list, deduping across scroll
-    positions. Returns ``(rows, selector_used)``.
+    """Scroll a virtualised GV thread list, deduping across scroll positions.
 
-    Google Voice uses a CDK virtual scroll viewport — off-screen rows are
-    destroyed from the DOM, so we have to extract incrementally as we
-    scroll instead of waiting for the full list to be present.
+    ``extract_rows(page, sel)`` defaults to :func:`_extract_visible_rows`.
+    ``row_key_fn(row)`` defaults to :func:`_row_key`.
     """
-    sel = _pick_thread_selector(page)
+    if extract_rows is None:
+        extract_rows = _extract_visible_rows
+    if row_key_fn is None:
+        row_key_fn = _row_key
+
+    sel = _pick_thread_selector(page, thread_selectors)
 
     since_cutoff: Optional[datetime] = None
     if since_days is not None and since_days > 0:
         since_cutoff = datetime.now() - timedelta(days=since_days)
         log.info(
-            "Limiting scrape to voicemails since %s (%d days).",
+            "Limiting scrape to %s since %s (%d days).",
+            list_label,
             since_cutoff.strftime("%Y-%m-%d"),
             since_days,
         )
@@ -429,10 +439,10 @@ def _scrape_thread_list(
 
     while True:
         # 1. Grab everything currently visible.
-        new_rows = _extract_visible_rows(page, sel)
+        new_rows = extract_rows(page, sel)
         added = 0
         for r in new_rows:
-            k = _row_key(r)
+            k = row_key_fn(r)
             if not k or k == "||":
                 continue
             if k not in collected:
@@ -506,18 +516,20 @@ def _scrape_thread_list(
         #    iterations in a row, or we've scrolled past the since_days window.
         if since_cutoff is not None and past_cutoff_iters >= 3:
             log.info(
-                "Reached voicemails older than %d days; stopping scroll.",
+                "Reached %s older than %d days; stopping scroll.",
+                list_label,
                 since_days,
             )
             break
         if no_new_iters >= 6:
             log.info(
-                "No new threads after %d scroll iterations; stopping.",
+                "No new %s threads after %d scroll iterations; stopping.",
+                list_label,
                 no_new_iters,
             )
             break
 
-    log.info("Found %d unique voicemail thread(s).", len(collected))
+    log.info("Found %d unique %s thread(s).", len(collected), list_label)
     rows = list(collected.values())
     return rows, sel
 
@@ -561,6 +573,54 @@ def _resolve_caller_via_thread(page, item_locator) -> Optional[str]:
     return number
 
 
+def _open_gv_browser(pw, storage_state_path: Path):
+    """Launch a headless GV browser context. Returns ``(context, browser)``."""
+    user_data_dir = storage_state_path.parent / "chrome_profile"
+    if not storage_state_path.exists() and not user_data_dir.exists():
+        raise SystemExit(
+            f"No Google Voice session found. Run "
+            f"`python -m ftc_automation login` first."
+        )
+
+    chrome_exe = _resolve_chrome_executable()
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-default-browser-check",
+        "--no-first-run",
+    ]
+
+    use_profile = user_data_dir.is_dir() and any(user_data_dir.iterdir())
+    browser = None
+    if use_profile:
+        log.info("Using Chrome profile from login (%s).", user_data_dir)
+        context = pw.chromium.launch_persistent_context(
+            user_data_dir=str(user_data_dir),
+            headless=True,
+            executable_path=chrome_exe,
+            channel="chrome" if not chrome_exe else None,
+            args=launch_args,
+            ignore_default_args=["--enable-automation"],
+            viewport={"width": 1280, "height": 900},
+        )
+    else:
+        log.info("Using storage_state.json (no chrome_profile found).")
+        browser = pw.chromium.launch(
+            headless=True,
+            executable_path=chrome_exe,
+            channel="chrome" if not chrome_exe else None,
+            args=launch_args,
+            ignore_default_args=["--enable-automation"],
+        )
+        context = browser.new_context(
+            storage_state=str(storage_state_path),
+            viewport={"width": 1280, "height": 900},
+        )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+    )
+    return context, browser
+
+
 def scrape_backlog(
     cfg: AppConfig,
     *,
@@ -581,12 +641,6 @@ def scrape_backlog(
         ) from exc
 
     storage_state_path = cfg.resolve_path(cfg.google_voice.storage_state_path)
-    user_data_dir = storage_state_path.parent / "chrome_profile"
-    if not storage_state_path.exists() and not user_data_dir.exists():
-        raise SystemExit(
-            f"No Google Voice session found. Run "
-            f"`python -m ftc_automation login` first."
-        )
 
     init_db(cfg.resolve_path(cfg.database.path))
     cap = limit if limit is not None else cfg.google_voice.max_threads
@@ -594,45 +648,10 @@ def scrape_backlog(
     if since_days is not None and since_days > 0:
         since_cutoff = datetime.now() - timedelta(days=since_days)
 
-    chrome_exe = _resolve_chrome_executable()
-    launch_args = [
-        "--disable-blink-features=AutomationControlled",
-        "--no-default-browser-check",
-        "--no-first-run",
-    ]
-
     inserted = 0
     skipped_old = 0
     with sync_playwright() as pw:
-        use_profile = user_data_dir.is_dir() and any(user_data_dir.iterdir())
-        browser = None
-        if use_profile:
-            log.info("Using Chrome profile from login (%s).", user_data_dir)
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=str(user_data_dir),
-                headless=True,
-                executable_path=chrome_exe,
-                channel="chrome" if not chrome_exe else None,
-                args=launch_args,
-                ignore_default_args=["--enable-automation"],
-                viewport={"width": 1280, "height": 900},
-            )
-        else:
-            log.info("Using storage_state.json (no chrome_profile found).")
-            browser = pw.chromium.launch(
-                headless=True,
-                executable_path=chrome_exe,
-                channel="chrome" if not chrome_exe else None,
-                args=launch_args,
-                ignore_default_args=["--enable-automation"],
-            )
-            context = browser.new_context(
-                storage_state=str(storage_state_path),
-                viewport={"width": 1280, "height": 900},
-            )
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
+        context, browser = _open_gv_browser(pw, storage_state_path)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(VOICE_URL, wait_until="domcontentloaded", timeout=60000)
         # Give the SPA a beat to render after DOM ready.
@@ -691,6 +710,7 @@ def scrape_backlog(
                 "received_at": received_at,
                 "duration_sec": duration,
                 "transcript": t["transcription"] or None,
+                "record_type": RECORD_VOICEMAIL,
                 "status": STATUS_NEW,
             }
 

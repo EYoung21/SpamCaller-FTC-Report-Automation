@@ -4,6 +4,7 @@ Run as a module from the project root:
 
     python -m ftc_automation login
     python -m ftc_automation ingest --backlog
+    python -m ftc_automation ingest --calls
     python -m ftc_automation ingest --gmail
     python -m ftc_automation classify [--limit N] [--reclassify]
     python -m ftc_automation approve [--min-confidence 0] [--retry-failed]
@@ -47,13 +48,18 @@ def _cmd_ingest(cfg: AppConfig, args: argparse.Namespace) -> int:
 
         scrape_backlog(cfg, limit=args.limit, since_days=args.since_days)
         did_anything = True
+    if args.calls:
+        from .ftc.ingest.gv_call_history import scrape_call_history
+
+        scrape_call_history(cfg, limit=args.limit, since_days=args.since_days)
+        did_anything = True
     if args.gmail:
         from .ftc.ingest.gmail_watcher import ingest_gmail
 
         ingest_gmail(cfg, max_messages=args.limit or 500)
         did_anything = True
     if not did_anything:
-        log.error("ingest: choose at least one of --backlog or --gmail")
+        log.error("ingest: choose at least one of --backlog, --calls, or --gmail")
         return 2
     return 0
 
@@ -134,8 +140,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("login", help="Interactive Google Voice login (saves storage_state.json)")
 
-    p_ing = sub.add_parser("ingest", help="Ingest voicemails into the DB")
-    p_ing.add_argument("--backlog", action="store_true", help="Playwright sweep of voice.google.com")
+    p_ing = sub.add_parser("ingest", help="Ingest voicemails / calls into the DB")
+    p_ing.add_argument("--backlog", action="store_true", help="Playwright sweep of GV voicemail tab")
+    p_ing.add_argument(
+        "--calls",
+        action="store_true",
+        help="Playwright sweep of GV call history (GV spam + cross-matched known spam callers)",
+    )
     p_ing.add_argument("--gmail", action="store_true", help="Pull forwarded VM emails from Gmail")
     p_ing.add_argument(
         "--limit",
@@ -148,10 +159,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="Only ingest voicemails from the last N days (GV backlog scrape).",
+        help="Only ingest items from the last N days (GV Playwright scrapes).",
     )
 
-    p_cls = sub.add_parser("classify", help="Run OpenAI classifier over pending voicemails")
+    p_cls = sub.add_parser("classify", help="Run Bedrock (Nova Micro) classifier over pending voicemails")
     p_cls.add_argument("--limit", type=int, default=None)
     p_cls.add_argument("--reclassify", action="store_true", help="Also re-run on already-classified rows")
 

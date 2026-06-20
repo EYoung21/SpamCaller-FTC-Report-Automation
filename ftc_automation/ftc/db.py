@@ -23,6 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -61,6 +62,9 @@ ALL_STATUSES = {
 SOURCE_PLAYWRIGHT = "playwright"
 SOURCE_GMAIL = "gmail"
 
+RECORD_VOICEMAIL = "voicemail"
+RECORD_CALL = "call"
+
 
 class Base(DeclarativeBase):
     pass
@@ -78,7 +82,14 @@ class Voicemail(Base):
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     source_msg_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
-    # Raw voicemail facts
+    # Record kind: voicemail (default) or answered/missed call from GV history.
+    record_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=RECORD_VOICEMAIL, index=True
+    )
+    gv_suspected_spam: Mapped[Optional[bool]] = mapped_column(Boolean, index=True)
+    call_type: Mapped[Optional[str]] = mapped_column(String(64))
+
+    # Raw voicemail / call facts
     caller_number: Mapped[Optional[str]] = mapped_column(String(32), index=True)
     caller_display_name: Mapped[Optional[str]] = mapped_column(String(255))
     received_at: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True)
@@ -144,6 +155,21 @@ def _build_engine(db_path: Path):
     return engine
 
 
+def _migrate_schema(engine) -> None:
+    """Add columns introduced after the initial release (SQLite has no ALTER)."""
+    with engine.begin() as conn:
+        existing = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(voicemails)"))
+        }
+        for col, typedef in (
+            ("record_type", "VARCHAR(32) NOT NULL DEFAULT 'voicemail'"),
+            ("gv_suspected_spam", "BOOLEAN"),
+            ("call_type", "VARCHAR(64)"),
+        ):
+            if col not in existing:
+                conn.execute(text(f"ALTER TABLE voicemails ADD COLUMN {col} {typedef}"))
+
+
 def init_db(db_path: Path | str) -> None:
     """Initialise engine + create tables for the given SQLite path."""
     global _engine, _SessionLocal, _current_db_path
@@ -156,6 +182,7 @@ def init_db(db_path: Path | str) -> None:
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
     _current_db_path = db_path
     Base.metadata.create_all(_engine)
+    _migrate_schema(_engine)
 
 
 def get_session() -> Session:
@@ -215,11 +242,14 @@ def upsert_voicemail(
         nat_received = defaults.get("received_at")
         nat_name = defaults.get("caller_display_name")
         nat_transcript = (defaults.get("transcript") or "")[:40]
+        nat_record_type = defaults.get("record_type")
         if nat_received is not None:
             q = session.query(Voicemail).filter(
                 Voicemail.source == source,
                 Voicemail.received_at == nat_received,
             )
+            if nat_record_type:
+                q = q.filter(Voicemail.record_type == nat_record_type)
             if nat_number:
                 q = q.filter(Voicemail.caller_number == nat_number)
             elif nat_name:

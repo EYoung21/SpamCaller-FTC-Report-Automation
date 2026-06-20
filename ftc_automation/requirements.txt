@@ -1,5 +1,6 @@
 playwright>=1.40
 openai>=1.40
+boto3>=1.42.42
 flask>=3.0
 google-api-python-client
 google-auth-oauthlib

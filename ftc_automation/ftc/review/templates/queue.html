@@ -70,6 +70,7 @@
   <thead>
     <tr>
       <th>#</th>
+      <th>Type</th>
       <th>Caller</th>
       <th>Received</th>
       <th>Dur</th>
@@ -83,6 +84,7 @@
     {% for vm in voicemails %}
     <tr>
       <td>{{ vm.id }}</td>
+      <td>{{ vm.record_type }}{% if vm.gv_suspected_spam %} · GV spam{% endif %}</td>
       <td>{{ vm.caller_number or vm.caller_display_name or '—' }}</td>
       <td>{{ vm.received_at|fmt_dt }}</td>
       <td>{{ vm.duration_sec|fmt_dur }}</td>

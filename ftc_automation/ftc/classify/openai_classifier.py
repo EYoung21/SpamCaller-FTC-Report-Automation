@@ -1,8 +1,8 @@
-"""OpenAI classifier for voicemails.
+"""Bedrock (Nova Micro) classifier for voicemails.
 
-For every voicemail in status='new' we call the OpenAI API once with
-structured outputs (JSON schema mode), receive a typed dict, and write
-the result back to the database with status='classified'.
+For every voicemail in status='new' we call Amazon Bedrock once with
+structured JSON output, receive a typed dict, and write the result back
+to the database with status='classified'.
 
 Run via CLI:
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime
@@ -42,8 +43,125 @@ from .prompts import (
 log = logging.getLogger(__name__)
 
 
-def _build_messages(caller_number: Optional[str], transcript: str) -> list[dict]:
-    """Construct the chat messages list, including few-shot examples."""
+def _bedrock_json_schema() -> dict:
+    """JSON schema compatible with Bedrock structured outputs."""
+    schema = json.loads(json.dumps(JSON_SCHEMA["schema"]))
+    for prop in ("callback_number", "claimed_company"):
+        schema["properties"][prop] = {
+            "type": "string",
+            "description": (
+                (schema["properties"][prop].get("description") or "")
+                + " Use an empty string if absent."
+            ),
+        }
+    return schema
+
+
+def _build_bedrock_messages(caller_number: Optional[str], transcript: str) -> list[dict]:
+    """Construct Converse API messages, including few-shot examples."""
+    messages: list[dict] = []
+    for ex in FEW_SHOT_EXAMPLES:
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": build_user_prompt(ex["caller_number"], ex["transcript"]),
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"text": json.dumps(ex["expected"], ensure_ascii=False)},
+                ],
+            }
+        )
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"text": build_user_prompt(caller_number, transcript)},
+            ],
+        }
+    )
+    return messages
+
+
+def _call_bedrock(
+    client,
+    *,
+    model_id: str,
+    caller_number: Optional[str],
+    transcript: str,
+) -> dict:
+    messages = _build_bedrock_messages(caller_number, transcript)
+    schema = _bedrock_json_schema()
+
+    kwargs = {
+        "modelId": model_id,
+        "system": [{"text": SYSTEM_PROMPT}],
+        "messages": messages,
+        "inferenceConfig": {"maxTokens": 2048, "temperature": 0},
+    }
+    use_structured = "nova" not in model_id.lower()
+
+    if use_structured:
+        kwargs["outputConfig"] = {
+            "textFormat": {
+                "type": "json_schema",
+                "structure": {
+                    "jsonSchema": {
+                        "schema": json.dumps(schema),
+                        "name": JSON_SCHEMA["name"],
+                        "description": "Voicemail spam classification result",
+                    }
+                },
+            }
+        }
+
+    try:
+        resp = client.converse(**kwargs)
+    except Exception as exc:
+        err = str(exc)
+        if use_structured and (
+            "outputConfig" in err or "textFormat" in err or "UnknownParameter" in err
+        ):
+            log.warning(
+                "Bedrock structured output unavailable (%s); falling back to prompt-only.",
+                exc,
+            )
+            kwargs.pop("outputConfig", None)
+            resp = client.converse(**kwargs)
+        else:
+            raise
+
+    content_blocks = resp.get("output", {}).get("message", {}).get("content") or []
+    text = ""
+    for block in content_blocks:
+        if isinstance(block, dict) and block.get("text"):
+            text = block["text"]
+            break
+    if not text:
+        raise RuntimeError("Bedrock returned empty content")
+
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+        text = text.strip()
+
+    result = json.loads(text)
+    for key in ("callback_number", "claimed_company"):
+        if not result.get(key):
+            result[key] = None
+    return result
+
+
+def _build_openai_messages(caller_number: Optional[str], transcript: str) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     for ex in FEW_SHOT_EXAMPLES:
         messages.append(
@@ -74,8 +192,7 @@ def _call_openai(
     caller_number: Optional[str],
     transcript: str,
 ) -> dict:
-    messages = _build_messages(caller_number, transcript)
-
+    messages = _build_openai_messages(caller_number, transcript)
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -115,22 +232,28 @@ def classify_pending(
     limit: Optional[int] = None,
     reclassify: bool = False,
 ) -> int:
-    """Classify pending voicemails. Returns number classified."""
+    """Classify pending voicemails via Bedrock Nova Micro. Returns count."""
     try:
-        from openai import OpenAI  # type: ignore
+        import boto3  # type: ignore
     except ImportError as exc:  # pragma: no cover
         raise SystemExit(
-            "openai package missing. Run `pip install -r requirements.txt`."
+            "boto3 package missing. Run `pip install -r requirements.txt`."
         ) from exc
 
-    api_key = cfg.openai.resolved_api_key()
-    if not api_key:
+    region = cfg.bedrock.resolved_region()
+    model_id = cfg.bedrock.resolved_model_id()
+    if not model_id:
         raise SystemExit(
-            "No OpenAI API key found. Set OPENAI_API_KEY or fill openai.api_key in config.yaml."
+            "No Bedrock model configured. Set BEDROCK_MODEL_ID or bedrock.model_id in config.yaml."
         )
 
     init_db(cfg.resolve_path(cfg.database.path))
-    client = OpenAI(api_key=api_key)
+    bedrock_client = boto3.client(
+        "bedrock-runtime",
+        region_name=region,
+    )
+    openai_client = None
+    backend = "bedrock"
 
     statuses = [STATUS_NEW]
     if reclassify:
@@ -140,14 +263,63 @@ def classify_pending(
     with session_scope() as session:
         stmt = (
             select(Voicemail)
-            .where(Voicemail.status.in_(statuses))
+            .where(
+                Voicemail.status.in_(statuses),
+                Voicemail.gv_suspected_spam.isnot(True),
+            )
             .order_by(Voicemail.received_at.is_(None), Voicemail.received_at.desc())
         )
         if limit:
             stmt = stmt.limit(limit)
         rows = list(session.execute(stmt).scalars())
 
-    log.info("Classifying %d voicemail(s)...", len(rows))
+    log.info(
+        "Classifying %d voicemail(s) with Bedrock %s (%s)...",
+        len(rows),
+        model_id,
+        region,
+    )
+
+    def _classify_transcript(caller_number: Optional[str], transcript: str) -> dict:
+        nonlocal backend, openai_client
+        if backend == "openai":
+            assert openai_client is not None
+            return _call_openai(
+                openai_client,
+                model=cfg.openai.model,
+                caller_number=caller_number,
+                transcript=transcript,
+            )
+        try:
+            return _call_bedrock(
+                bedrock_client,
+                model_id=model_id,
+                caller_number=caller_number,
+                transcript=transcript,
+            )
+        except Exception as exc:
+            if "AccessDenied" not in str(exc):
+                raise
+            if os.environ.get("PREFER_BEDROCK", "").strip().lower() in ("1", "true", "yes"):
+                raise
+            api_key = cfg.openai.resolved_api_key()
+            if not api_key:
+                raise
+            from openai import OpenAI  # type: ignore
+
+            log.warning(
+                "Bedrock denied (%s); falling back to OpenAI %s for remaining rows.",
+                exc,
+                cfg.openai.model,
+            )
+            backend = "openai"
+            openai_client = OpenAI(api_key=api_key)
+            return _call_openai(
+                openai_client,
+                model=cfg.openai.model,
+                caller_number=caller_number,
+                transcript=transcript,
+            )
 
     for row_id_tuple in [(r.id,) for r in rows]:
         vm_id = row_id_tuple[0]
@@ -171,12 +343,7 @@ def classify_pending(
                 continue
 
             try:
-                result = _call_openai(
-                    client,
-                    model=cfg.openai.model,
-                    caller_number=vm.caller_number,
-                    transcript=transcript,
-                )
+                result = _classify_transcript(vm.caller_number, transcript)
             except Exception as exc:  # pragma: no cover - network errors
                 log.warning("Classification failed for VM %s: %s", vm.id, exc)
                 continue
@@ -191,7 +358,6 @@ def classify_pending(
                 vm.scam_category,
             )
 
-        # Cheap politeness sleep so we don't slam the API.
         time.sleep(0.2)
 
     log.info("Done. Classified %d voicemail(s).", classified)
