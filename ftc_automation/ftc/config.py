@@ -161,6 +161,9 @@ class ReviewConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 5000
     bulk_approve_min_confidence: float = 0.9
+    # LLM spam with should_report skips human review and goes straight to submit.
+    auto_approve_spam: bool = True
+    auto_submit: bool = True
 
 
 class AppConfig(BaseModel):

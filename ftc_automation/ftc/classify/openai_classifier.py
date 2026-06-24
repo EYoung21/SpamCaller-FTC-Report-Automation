@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from ..config import AppConfig, load_config
 from ..db import (
+    STATUS_APPROVED,
     STATUS_CLASSIFIED,
     STATUS_NEW,
     Voicemail,
@@ -208,7 +209,12 @@ def _call_openai(
     return json.loads(content)
 
 
-def _apply_classification(vm: Voicemail, result: dict) -> None:
+def _apply_classification(
+    vm: Voicemail,
+    result: dict,
+    *,
+    auto_approve_spam: bool = True,
+) -> None:
     vm.is_spam = bool(result.get("is_spam"))
     vm.confidence = float(result.get("confidence") or 0.0)
     vm.callback_number = result.get("callback_number") or None
@@ -222,8 +228,12 @@ def _apply_classification(vm: Voicemail, result: dict) -> None:
     vm.ftc_subject_id = subject_id
     vm.ftc_subject_text = free_text
 
+    now = datetime.utcnow()
+    vm.classified_at = now
     vm.status = STATUS_CLASSIFIED
-    vm.classified_at = datetime.utcnow()
+    if auto_approve_spam and vm.is_spam and vm.should_report:
+        vm.status = STATUS_APPROVED
+        vm.reviewed_at = now
 
 
 def classify_pending(
@@ -231,6 +241,7 @@ def classify_pending(
     *,
     limit: Optional[int] = None,
     reclassify: bool = False,
+    submit: Optional[bool] = None,
 ) -> int:
     """Classify pending voicemails via Bedrock Nova Micro. Returns count."""
     try:
@@ -348,19 +359,33 @@ def classify_pending(
                 log.warning("Classification failed for VM %s: %s", vm.id, exc)
                 continue
 
-            _apply_classification(vm, result)
+            _apply_classification(
+                vm,
+                result,
+                auto_approve_spam=cfg.review.auto_approve_spam,
+            )
             classified += 1
             log.info(
-                "VM %s -> is_spam=%s conf=%.2f cat=%s",
+                "VM %s -> is_spam=%s conf=%.2f cat=%s status=%s",
                 vm.id,
                 vm.is_spam,
                 vm.confidence or 0.0,
                 vm.scam_category,
+                vm.status,
             )
 
         time.sleep(0.2)
 
     log.info("Done. Classified %d voicemail(s).", classified)
+
+    do_submit = cfg.review.auto_submit if submit is None else submit
+    if classified and do_submit:
+        from ..submit.ftc_playwright import submit_approved
+
+        submitted = submit_approved(cfg, once=True, limit=limit)
+        if submitted >= 0:
+            log.info("Auto-submitted %d complaint(s) after classification.", submitted)
+
     return classified
 
 

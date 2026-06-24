@@ -7,6 +7,7 @@ Run as a module from the project root:
     python -m ftc_automation ingest --calls
     python -m ftc_automation ingest --gmail
     python -m ftc_automation classify [--limit N] [--reclassify]
+    python -m ftc_automation pipeline [--since-days N]
     python -m ftc_automation approve [--min-confidence 0] [--retry-failed]
     python -m ftc_automation review
     python -m ftc_automation submit [--once] [--limit N]
@@ -67,7 +68,28 @@ def _cmd_ingest(cfg: AppConfig, args: argparse.Namespace) -> int:
 def _cmd_classify(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .ftc.classify.openai_classifier import classify_pending
 
-    classify_pending(cfg, limit=args.limit, reclassify=args.reclassify)
+    classify_pending(
+        cfg,
+        limit=args.limit,
+        reclassify=args.reclassify,
+        submit=False if args.no_submit else None,
+    )
+    return 0
+
+
+def _cmd_pipeline(cfg: AppConfig, args: argparse.Namespace) -> int:
+    from .ftc.pipeline import run_pipeline
+
+    if args.no_submit:
+        cfg.review.auto_submit = False
+    run_pipeline(
+        cfg,
+        since_days=args.since_days,
+        limit=args.limit,
+        voicemail=not args.calls_only,
+        calls=not args.voicemail_only,
+        submit=not args.no_submit,
+    )
     return 0
 
 
@@ -165,6 +187,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cls = sub.add_parser("classify", help="Run Bedrock (Nova Micro) classifier over pending voicemails")
     p_cls.add_argument("--limit", type=int, default=None)
     p_cls.add_argument("--reclassify", action="store_true", help="Also re-run on already-classified rows")
+    p_cls.add_argument(
+        "--no-submit",
+        action="store_true",
+        help="Skip auto-submit after classification (default: submit approved spam)",
+    )
+
+    p_pipe = sub.add_parser(
+        "pipeline",
+        help="Ingest since last run, classify, and auto-submit spam (voicemail + call history)",
+    )
+    p_pipe.add_argument(
+        "--since-days",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Ingest window in days (default: since last pipeline run)",
+    )
+    p_pipe.add_argument("--limit", type=int, default=None)
+    p_pipe.add_argument("--no-submit", action="store_true", help="Classify only; do not file with FTC")
+    p_pipe.add_argument("--voicemail-only", action="store_true", help="Skip call-history ingest")
+    p_pipe.add_argument("--calls-only", action="store_true", help="Skip voicemail backlog ingest")
 
     p_apr = sub.add_parser(
         "approve",
@@ -211,6 +254,7 @@ _DISPATCH = {
     "login": _cmd_login,
     "ingest": _cmd_ingest,
     "classify": _cmd_classify,
+    "pipeline": _cmd_pipeline,
     "approve": _cmd_approve,
     "review": _cmd_review,
     "submit": _cmd_submit,
